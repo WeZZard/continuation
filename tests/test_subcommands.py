@@ -72,7 +72,7 @@ def test_register_terminal_seed_refused(cli, tmp_path):
 
 def test_register_future_schema_refused(cli, seed_file):
     proc = cli("register", "future-task", "--agent", "claude-code",
-               "--seed", seed_file(schema_version=2), expect=1)
+               "--seed", seed_file(schema_version=3), expect=1)
     assert "unsupported schema_version" in proc.stderr
 
 

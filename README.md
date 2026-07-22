@@ -73,6 +73,13 @@ Any grammar change — even an additive schedule mode — bumps the edition.
 Agents always author the current edition: the instruction section is a
 program constant.
 
+Editions so far: **1** — initial grammar. **2** — documents lead with the
+`<REGISTRY>` core block and an instruction preamble; `when_to_continue`
+may be `""` (a task with no continuation to continue), in which case the
+rendered document replaces the return vocabulary with a `## Completion`
+section carrying only the terminal end block. Edition-1 cores and
+legacy top-`<CONTINUATION>` documents remain parseable.
+
 ## Agents (v1)
 
 `claude-code` (`claude -p --output-format json --permission-mode auto

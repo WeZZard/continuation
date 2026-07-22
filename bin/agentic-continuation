@@ -34,8 +34,12 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 1
-SUPPORTED_SCHEMAS = {1}
+SCHEMA_VERSION = 2
+# Edition 2: when_to_continue may be the empty string — a task with no
+# continuation to continue; its rendered document omits the return
+# vocabulary except the terminal end block. Edition 1 (non-empty required)
+# remains accepted; a v1 core is a valid v2 core.
+SUPPORTED_SCHEMAS = {1, 2}
 CORE_KEYS = {
     "schema_version", "step", "task", "when_to_stop",
     "when_to_continue", "context", "schedule",
@@ -59,6 +63,24 @@ HEADER = (
     "     replace this file's successors, they do not modify it -->\n"
 )
 
+INSTRUCTION = """You are evaluating a registered continuation. Perform the task below now:
+honor every stop condition, and state plainly in your final message what you
+did or why you stopped.
+"""
+
+COMPLETION_SECTION = """## Completion
+
+This task has no continuation to continue. When its work is complete, end
+this line by returning exactly this terminal block in your FINAL message:
+
+<CONTINUATION>
+{ "schema_version": 2, "step": "end" }
+</CONTINUATION>
+
+Returning nothing keeps this task scheduled per its own schedule (that is
+how it waits for the world).
+"""
+
 CONTINUATION_SECTION = """## Continuation
 
 Evaluating this task returns zero, one, or several continuations. Register
@@ -69,7 +91,7 @@ extracts, validates, and registers them; you never write state files:
 
 <CONTINUATION>
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "step": "...",
   "task": "...",
   "when_to_stop": ["..."],
@@ -79,8 +101,9 @@ extracts, validates, and registers them; you never write state files:
 }
 </CONTINUATION>
 
-`schema_version` must be exactly 1. `schedule` must be exactly one of the
-schema_version-1 forms:
+`schema_version` must be exactly 2. `when_to_continue` may be "" when the
+returned task has no continuation to continue. `schedule` must be exactly
+one of the schema_version-2 forms:
 
 - `{ "mode": "now" }` — due on the next dispatcher tick
 - `{ "mode": "every", "amount": N, "unit": "m" | "h" | "d" }` — due when that
@@ -94,7 +117,7 @@ again per its own schedule (that is how a step waits for the world). To end
 this line of work with no successor, return exactly this terminal block:
 
 <CONTINUATION>
-{ "schema_version": 1, "step": "end" }
+{ "schema_version": 2, "step": "end" }
 </CONTINUATION>
 
 Choose each returned schedule to match what that step actually waits for.
@@ -252,9 +275,14 @@ def validate_core(core) -> str | None:
         return "step must be kebab-case"
     if core["step"] == "end":
         return "terminal block must carry exactly schema_version and step"
-    for key in ("task", "when_to_continue", "context"):
+    for key in ("task", "context"):
         if not (isinstance(core[key], str) and core[key].strip()):
             return f"{key} must be a non-empty string"
+    wtc = core["when_to_continue"]
+    if not isinstance(wtc, str):
+        return "when_to_continue must be a string"
+    if not wtc.strip() and version < 2:
+        return "when_to_continue must be non-empty in schema_version 1"
     stops = core["when_to_stop"]
     if not (isinstance(stops, list) and stops
             and all(isinstance(s, str) and s.strip() for s in stops)):
@@ -306,13 +334,20 @@ def schedule_due(schedule: dict, last_evaluated: datetime | None, now: datetime)
 
 def render_task_section(core: dict) -> str:
     stops = "\n".join(f"- {item}" for item in core["when_to_stop"])
-    return (
+    body = (
+        f"{INSTRUCTION}\n"
         f"## Task\n\n{core['task']}\n\n"
         f"**Context from the previous step:** {core['context']}\n\n"
         f"## When to Stop\n\n{stops}\n\n"
-        f"{CONTINUATION_SECTION}\n"
-        f"## When to Continue\n\n{core['when_to_continue']}\n"
     )
+    if core["when_to_continue"].strip():
+        body += (
+            f"{CONTINUATION_SECTION}\n"
+            f"## When to Continue\n\n{core['when_to_continue']}\n"
+        )
+    else:
+        body += COMPLETION_SECTION
+    return body
 
 
 def render_document(core: dict, task_rules: list[str]) -> str:
@@ -320,21 +355,28 @@ def render_document(core: dict, task_rules: list[str]) -> str:
     principles = PRINCIPLES + rules if rules else PRINCIPLES
     body = render_task_section(core)
     return (
-        HEADER
-        + "\n<CONTINUATION>\n"
+        "<REGISTRY>\n"
         + json.dumps(core, indent=2, ensure_ascii=False)
-        + "\n</CONTINUATION>\n\n"
-        + "<TASK>\n````markdown\n"
+        + "\n</REGISTRY>\n\n"
+        + HEADER
+        + "\n<TASK>\n````markdown\n"
         + body
         + "````\n</TASK>\n\n"
         + principles
     )
 
 
+REGISTRY_RE = re.compile(r"<REGISTRY>\s*(.*?)\s*</REGISTRY>", re.DOTALL)
+
+
 def parse_document_core(text: str) -> dict:
-    """The top-level core: the first <CONTINUATION> block before <TASK>."""
+    """The registered core: the <REGISTRY> block heading the document.
+
+    Documents rendered before edition 2 carried the core as a
+    <CONTINUATION> block before <TASK>; those remain parseable.
+    """
     head = text.split("<TASK>", 1)[0]
-    blocks = BLOCK_RE.findall(head)
+    blocks = REGISTRY_RE.findall(head) or BLOCK_RE.findall(head)
     if len(blocks) != 1:
         raise ValueError(f"expected one core block before <TASK>, found {len(blocks)}")
     core = json.loads(blocks[0])

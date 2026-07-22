@@ -65,7 +65,7 @@ def fake_agent(tmp_path):
 
 def make_seed(**overrides):
     seed = {
-        "schema_version": 1,
+        "schema_version": 2,
         "step": "probe-step",
         "task": "Check whether the thing finished.",
         "when_to_stop": ["Thing still running - stop, return nothing."],
