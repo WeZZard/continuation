@@ -713,10 +713,20 @@ def cmd_tick(args) -> int:
                         "actor": args.actor, "outcome": "ok" if code == 0 else f"agent-exit-{code}",
                         "session_ref": session_ref})
             # The claude-code stop-hook plugin normally performs `continue`
-            # during the run. If it did not (state unchanged), fall back to
-            # extracting from the captured final message here.
+            # during the run — but it reads the transcript FILE, which may
+            # not have flushed the final message yet (observed live). The
+            # dispatcher's captured output IS the final message, so run the
+            # fallback whenever the hook either never ran (evaluations
+            # unchanged) OR ran against a stale transcript (still pending
+            # while the authoritative text carries blocks). A stale-hook
+            # rescue double-counts one evaluation; the audit log shows both.
             state_after = load_state(state_path)
-            if state_after["evaluations"] == state["evaluations"]:
+            captured_cores, _ = extract_blocks(final_text)
+            hook_never_ran = state_after["evaluations"] == state["evaluations"]
+            hook_ran_stale = (not hook_never_ran
+                              and state_after["status"] == "pending"
+                              and bool(captured_cores))
+            if hook_never_ran or hook_ran_stale:
                 continue_args = argparse.Namespace(
                     task_id=task_id, run=run_id, from_id=cid,
                     actor="dispatcher-fallback", session_ref=session_ref)
