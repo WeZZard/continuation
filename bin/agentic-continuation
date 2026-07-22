@@ -401,6 +401,10 @@ def start_run(task_id: str, task: dict) -> tuple[str, str]:
     seed_path = task_dir(task_id) / "continuation.md"
     core = parse_document_core(seed_path.read_text(encoding="utf-8"))
     run_id = stamp()
+    seq = 2
+    while run_dir(task_id, run_id).exists():
+        run_id = f"{stamp()}-{seq}"  # same-second re-seed must not reuse a run
+        seq += 1
     run_dir(task_id, run_id).mkdir(parents=True, exist_ok=True)
     cid = register_continuation(task_id, run_id, core, task.get("must_not", []), "seed")
     return run_id, cid
@@ -506,6 +510,8 @@ def cmd_register(args) -> int:
             },
             "registered_at": now_utc().isoformat(),
         }
+        if args.agent_command:
+            registry["tasks"][args.task_id]["agent_command"] = args.agent_command
         atomic_write(task_dir(args.task_id) / "continuation.md",
                      render_document(core, args.must_not or []))
         save_registry(registry)
@@ -554,7 +560,11 @@ def cmd_list(args) -> int:
             if state["status"] != "pending":
                 print(f"    {cid}: {state['status']}")
                 continue
-            core = parse_document_core(doc_path.read_text(encoding="utf-8"))
+            try:
+                core = parse_document_core(doc_path.read_text(encoding="utf-8"))
+            except (ValueError, json.JSONDecodeError) as error:
+                print(f"    {cid}: INVALID — {error}")
+                continue
             last = (datetime.fromisoformat(state["last_evaluated_at"]).astimezone().replace(tzinfo=None)
                     if state["last_evaluated_at"] else None)
             due = schedule_due(core["schedule"], last, now)
@@ -587,6 +597,9 @@ def cmd_continue(args) -> int:
         if task is None:
             raise SystemExit(f"unknown task {args.task_id}")
         _, state_path = continuation_paths(args.task_id, args.run, args.from_id)
+        if not state_path.exists():
+            raise SystemExit(
+                f"unknown continuation {args.from_id} in {args.task_id}/{args.run}")
         state = load_state(state_path)
         state["evaluations"] += 1
         state["last_evaluated_at"] = now_utc().isoformat()
@@ -652,7 +665,24 @@ def cmd_tick(args) -> int:
             state = load_state(state_path)
             if state["status"] != "pending":
                 continue
-            core = parse_document_core(doc_path.read_text(encoding="utf-8"))
+            try:
+                core = parse_document_core(doc_path.read_text(encoding="utf-8"))
+            except (ValueError, json.JSONDecodeError) as error:
+                # A document this tool did not render (or a future edition):
+                # quarantine it so the run can settle and a human decides.
+                state["status"] = "invalid"
+                atomic_write(state_path, json.dumps(state, indent=2))
+                append_log({"cmd": "tick.evaluate", "task_id": task_id,
+                            "run_id": run_id, "continuation_id": cid,
+                            "actor": args.actor, "outcome": "invalid-continuation",
+                            "error": str(error)})
+                notify_things(
+                    f"[{task_id}] invalid continuation quarantined",
+                    f"{run_id}/{cid}: {error}\n"
+                    f"agentic-continuation show {task_id} --run {run_id} "
+                    f"--continuation {cid}",
+                )
+                continue
             last = (datetime.fromisoformat(state["last_evaluated_at"]).astimezone().replace(tzinfo=None)
                     if state["last_evaluated_at"] else None)
             if not schedule_due(core["schedule"], last, now):
@@ -751,9 +781,9 @@ def cmd_verify(args) -> int:
     findings = []
     for run_id in list_runs(args.task_id):
         for cid in list_continuations(args.task_id, run_id):
-            doc_path, state_path = continuation_paths(args.task_id, run_id, cid)
-            if load_state(state_path)["status"] == "pending":
-                continue
+            doc_path, _ = continuation_paths(args.task_id, run_id, cid)
+            # Pending continuations carry the freshest claims: their context
+            # was authored by the completed step that returned them.
             core = parse_document_core(doc_path.read_text(encoding="utf-8"))
             for match in re.findall(r"(?:~|/)[\w./~-]+", core["context"]):
                 path = Path(match).expanduser()
@@ -802,6 +832,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Task-scoped MUST NOT rule (repeatable), without the prefix.")
     p.add_argument("--allow-write", action="append")
     p.add_argument("--allow-net", action="append")
+    p.add_argument("--agent-command", default=None,
+                   help="Override the agent binary (testing / custom installs).")
     p.add_argument("--force", action="store_true")
     p.set_defaults(fn=cmd_register)
 
