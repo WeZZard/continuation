@@ -168,6 +168,34 @@ def stamp() -> str:
     return now_utc().strftime("%Y%m%dT%H%M%SZ")
 
 
+RUN_LOCK_MAX_AGE_SECONDS = 2 * 3600  # 2x the default agent timeout
+
+
+def acquire_run_lock(lock_path: Path) -> bool:
+    """Atomic test-and-set via O_CREAT|O_EXCL; breaks locks older than
+    RUN_LOCK_MAX_AGE_SECONDS (a kill -9 mid-evaluation must not starve the
+    run forever). Returns True when this caller holds the lock."""
+    import time as _time
+    for _ in range(2):  # second attempt only after breaking a stale lock
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(f"{os.getpid()} {now_utc().isoformat()}\n")
+            return True
+        except FileExistsError:
+            try:
+                age = _time.time() - lock_path.stat().st_mtime
+            except OSError:
+                continue  # holder released between our attempts; retry
+            if age <= RUN_LOCK_MAX_AGE_SECONDS:
+                return False
+            append_log({"cmd": "tick.break-stale-lock", "actor": "dispatcher",
+                        "outcome": "ok", "lock": str(lock_path),
+                        "age_seconds": int(age)})
+            lock_path.unlink(missing_ok=True)
+    return False
+
+
 class StoreLock:
     def __enter__(self):
         STORE.mkdir(parents=True, exist_ok=True)
@@ -702,8 +730,6 @@ def cmd_tick(args) -> int:
                             "run_id": run_id, "continuation_id": first_cid,
                             "actor": args.actor, "outcome": "ok"})
         lock_path = run_dir(task_id, run_id) / ".run-lock"
-        if lock_path.exists():
-            continue  # an evaluation of this run is already in flight
         for cid in list_continuations(task_id, run_id):
             doc_path, state_path = continuation_paths(task_id, run_id, cid)
             state = load_state(state_path)
@@ -737,7 +763,8 @@ def cmd_tick(args) -> int:
                 continue
             prompt = doc_path.read_text(encoding="utf-8")
             workdir = run_dir(task_id, run_id)
-            atomic_write(lock_path, stamp())
+            if not acquire_run_lock(lock_path):
+                break  # another dispatcher is evaluating this run
             try:
                 code, final_text, session_ref = spawn_agent(
                     task, task_id, run_id, cid, prompt, workdir)

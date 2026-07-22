@@ -320,3 +320,30 @@ def test_verify_reports_missing_and_present_paths(cli, store, registered,
     proc = cli("verify", registered, expect=1)
     assert f"OK   {run}/verified-step--01: {artifact}" in proc.stdout
     assert "MISS" in proc.stdout
+
+
+def test_tick_breaks_stale_run_lock(cli, store, registered, tmp_path):
+    import os as _os
+    import time as _time
+    cli("tick", "--dry-run")
+    run = next((store / "tasks" / registered / "runs").iterdir())
+    lock = run / ".run-lock"
+    lock.write_text("stale holder")
+    old = _time.time() - 3 * 3600
+    _os.utime(lock, (old, old))
+    response = tmp_path / "response.txt"
+    response.write_text("Checked; still waiting.")
+    capture = tmp_path / "capture.json"
+    cli("tick", env={"FAKE_AGENT_RESPONSE": str(response),
+                     "FAKE_AGENT_CAPTURE": str(capture)})
+    assert capture.exists()  # stale lock broken, evaluation proceeded
+    assert any(e["cmd"] == "tick.break-stale-lock" for e in read_log(store))
+
+
+def test_tick_fresh_run_lock_still_respected(cli, store, registered, tmp_path):
+    cli("tick", "--dry-run")
+    run = next((store / "tasks" / registered / "runs").iterdir())
+    (run / ".run-lock").write_text("live holder")
+    capture = tmp_path / "capture.json"
+    cli("tick", env={"FAKE_AGENT_CAPTURE": str(capture)})
+    assert not capture.exists()
