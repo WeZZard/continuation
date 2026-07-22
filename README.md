@@ -6,7 +6,7 @@ returning functions — and this tool is the trampoline that consumes them.
 
 ## Model
 
-- A **task** (kebab-case id) has a **seed** continuation and **runs**; each
+- A **task** (kebab-case id) has a task-level **continuation** and **runs**; each
   run is a flat set of **continuations** (values, not a graph — cycles and
   fan-out are both legal because nothing constrains them).
 - A **continuation document** is synthesized by this program: the agent-
@@ -26,7 +26,7 @@ returning functions — and this tool is the trampoline that consumes them.
   for the world); the terminal block `{"schema_version": 1, "step": "end"}`
   ends a line of work; a run is **settled** when no pending continuations
   remain. Single-run tasks disable themselves when settled; repetitive tasks
-  re-seed a fresh run on the next tick.
+  start a fresh run from the task continuation on the next tick.
 - **Observability**: `list` (state + due-ness), `log` (the audit trail,
   filterable), `show` (documents), `verify` (claimed artifact paths exist),
   Things 3 todos on run-complete / failure / possibly-stuck.
@@ -36,10 +36,10 @@ returning functions — and this tool is the trampoline that consumes them.
 ```bash
 BIN=~/Artifacts/Repositories/com.github/WeZZard/agentic-continuation/bin/agentic-continuation
 
-# Register a task from a seed core (7-key JSON)
+# Register a task from a continuation core (7-key JSON)
 $BIN register my-task --agent claude-code --single-run \
   --must-not "push to any git remote" \
-  --seed seed.json
+  --continuation continuation.json
 
 $BIN list
 $BIN tick --dry-run          # what would run now
@@ -52,7 +52,7 @@ $BIN log --task my-task      # the audit trail
 
 `~/.local/share/agentic-continuation/` (override:
 `AGENTIC_CONTINUATION_STORE`): `registry.json`, `log.jsonl`,
-`tasks/<id>/continuation.md` (seed), `tasks/<id>/runs/<run>/` (the agent's
+`tasks/<id>/continuation.md` (the task continuation), `tasks/<id>/runs/<run>/` (the agent's
 workspace) with `continuations/<cid>.md` + `.state.json`. Agent transcripts
 stay in each agent's own home; the log stores session references, not
 copies.

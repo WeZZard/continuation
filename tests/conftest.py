@@ -63,36 +63,36 @@ def fake_agent(tmp_path):
     return str(path)
 
 
-def make_seed(**overrides):
-    seed = {
+def make_continuation_core(**overrides):
+    core = {
         "schema_version": 2,
         "step": "probe-step",
         "task": "Check whether the thing finished.",
         "when_to_stop": ["Thing still running - stop, return nothing."],
         "when_to_continue": "When done, return the next step.",
-        "context": "Integration test seed.",
+        "context": "Integration test continuation.",
         "schedule": {"mode": "now"},
     }
-    seed.update(overrides)
-    return seed
+    core.update(overrides)
+    return core
 
 
 @pytest.fixture()
-def seed_file(tmp_path):
+def continuation_file(tmp_path):
     def write(**overrides):
-        path = tmp_path / "seed.json"
-        path.write_text(json.dumps(make_seed(**overrides)))
+        path = tmp_path / "continuation.json"
+        path.write_text(json.dumps(make_continuation_core(**overrides)))
         return str(path)
     return write
 
 
 @pytest.fixture()
-def registered(cli, seed_file, fake_agent):
+def registered(cli, continuation_file, fake_agent):
     """A registered single-run task wired to the fake agent."""
     cli("register", "it-task", "--agent", "claude-code", "--single-run",
         "--agent-command", fake_agent,
         "--must-not", "touch production",
-        "--seed", seed_file())
+        "--continuation", continuation_file())
     return "it-task"
 
 
@@ -104,5 +104,5 @@ def read_log(store):
 
 
 def continuation_block(**overrides):
-    core = make_seed(**overrides)
+    core = make_continuation_core(**overrides)
     return "<CONTINUATION>\n" + json.dumps(core) + "\n</CONTINUATION>"

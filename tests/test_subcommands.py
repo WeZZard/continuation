@@ -6,73 +6,73 @@ tests run the full spawn loop through the fake agent binary.
 
 import json
 
-from conftest import continuation_block, make_seed, read_log
+from conftest import continuation_block, make_continuation_core, read_log
 
 
 # ------------------------------------------------------------------ register
 
-def test_register_happy_renders_seed_and_logs(cli, store, seed_file):
+def test_register_happy_renders_continuation_and_logs(cli, store, continuation_file):
     out = cli("register", "my-task", "--agent", "claude-code",
-              "--seed", seed_file()).stdout
+              "--continuation", continuation_file()).stdout
     assert "registered my-task" in out
-    seed_doc = (store / "tasks" / "my-task" / "continuation.md").read_text()
-    assert '"step": "probe-step"' in seed_doc
-    assert "You **MUST NOT** write or edit any file" in seed_doc
+    doc = (store / "tasks" / "my-task" / "continuation.md").read_text()
+    assert '"step": "probe-step"' in doc
+    assert "You **MUST NOT** write or edit any file" in doc
     entries = read_log(store)
     assert entries[-1]["cmd"] == "register"
     assert entries[-1]["task_id"] == "my-task"
     assert entries[-1]["outcome"] == "ok"
 
 
-def test_register_task_rules_rendered(cli, store, seed_file):
+def test_register_task_rules_rendered(cli, store, continuation_file):
     cli("register", "ruled-task", "--agent", "pi",
         "--must-not", "touch the fits", "--must-not", "push to any git remote",
-        "--seed", seed_file())
+        "--continuation", continuation_file())
     doc = (store / "tasks" / "ruled-task" / "continuation.md").read_text()
     assert "You **MUST NOT** touch the fits" in doc
     assert "You **MUST NOT** push to any git remote" in doc
 
 
-def test_register_seed_from_stdin(cli, store):
-    cli("register", "stdin-task", "--agent", "claude-code", "--seed", "-",
-        stdin=json.dumps(make_seed()))
+def test_register_continuation_from_stdin(cli, store):
+    cli("register", "stdin-task", "--agent", "claude-code", "--continuation", "-",
+        stdin=json.dumps(make_continuation_core()))
     assert (store / "tasks" / "stdin-task" / "continuation.md").exists()
 
 
-def test_register_duplicate_refused_force_replaces(cli, seed_file):
-    cli("register", "dup-task", "--agent", "claude-code", "--seed", seed_file())
+def test_register_duplicate_refused_force_replaces(cli, continuation_file):
+    cli("register", "dup-task", "--agent", "claude-code", "--continuation", continuation_file())
     proc = cli("register", "dup-task", "--agent", "claude-code",
-               "--seed", seed_file(), expect=1)
+               "--continuation", continuation_file(), expect=1)
     assert "already registered" in proc.stderr
     cli("register", "dup-task", "--agent", "claude-code", "--force",
-        "--seed", seed_file(step="replacement-step"))
+        "--continuation", continuation_file(step="replacement-step"))
 
 
-def test_register_non_kebab_id_refused(cli, seed_file):
+def test_register_non_kebab_id_refused(cli, continuation_file):
     proc = cli("register", "Not_Kebab", "--agent", "claude-code",
-               "--seed", seed_file(), expect=1)
+               "--continuation", continuation_file(), expect=1)
     assert "kebab-case" in proc.stderr
 
 
-def test_register_invalid_seed_refused(cli, seed_file, store):
-    proc = cli("register", "bad-seed", "--agent", "claude-code",
-               "--seed", seed_file(schedule={"mode": "cron", "expr": "*"}),
+def test_register_invalid_continuation_refused(cli, continuation_file, store):
+    proc = cli("register", "bad-continuation", "--agent", "claude-code",
+               "--continuation", continuation_file(schedule={"mode": "cron", "expr": "*"}),
                expect=1)
-    assert "invalid seed" in proc.stderr
-    assert not (store / "tasks" / "bad-seed").exists()
+    assert "invalid continuation" in proc.stderr
+    assert not (store / "tasks" / "bad-continuation").exists()
 
 
-def test_register_terminal_seed_refused(cli, tmp_path):
+def test_register_terminal_continuation_refused(cli, tmp_path):
     path = tmp_path / "terminal.json"
     path.write_text(json.dumps({"schema_version": 1, "step": "end"}))
     proc = cli("register", "terminal-task", "--agent", "claude-code",
-               "--seed", str(path), expect=1)
+               "--continuation", str(path), expect=1)
     assert "terminal" in proc.stderr
 
 
-def test_register_future_schema_refused(cli, seed_file):
+def test_register_future_schema_refused(cli, continuation_file):
     proc = cli("register", "future-task", "--agent", "claude-code",
-               "--seed", seed_file(schema_version=3), expect=1)
+               "--continuation", continuation_file(schema_version=3), expect=1)
     assert "unsupported schema_version" in proc.stderr
 
 
@@ -113,7 +113,7 @@ def test_list_reports_unparseable_document(cli, store, registered):
 
 # ---------------------------------------------------------------------- show
 
-def test_show_seed_and_specific_continuation(cli, store, registered):
+def test_show_task_continuation_and_specific_continuation(cli, store, registered):
     assert '"step": "probe-step"' in cli("show", registered).stdout
     cli("tick", "--dry-run")
     run = next((store / "tasks" / registered / "runs").iterdir()).name
@@ -180,7 +180,7 @@ def test_continue_mixed_valid_invalid_blocks(cli, store, registered):
     run = next((store / "tasks" / registered / "runs").iterdir()).name
     text = ("Partial.\n" + continuation_block(step="good-step")
             + "\n<CONTINUATION>{not json}</CONTINUATION>"
-            + "\n<CONTINUATION>" + json.dumps(make_seed(schema_version=9)) + "</CONTINUATION>")
+            + "\n<CONTINUATION>" + json.dumps(make_continuation_core(schema_version=9)) + "</CONTINUATION>")
     cli("continue", registered, "--run", run, "--from", "probe-step--01",
         stdin=text)
     entry = read_log(store)[-1]
@@ -236,10 +236,10 @@ def test_tick_full_loop_via_fake_agent(cli, store, registered, tmp_path):
     assert fallback and fallback[-1]["returned"] == ["report-step--01"]
 
 
-def test_tick_not_due_schedule_skipped(cli, store, seed_file, fake_agent):
+def test_tick_not_due_schedule_skipped(cli, store, continuation_file, fake_agent):
     cli("register", "later-task", "--agent", "claude-code",
         "--agent-command", fake_agent,
-        "--seed", seed_file(schedule={"mode": "daily", "at": "23:59"}))
+        "--continuation", continuation_file(schedule={"mode": "daily", "at": "23:59"}))
     assert "would evaluate" not in cli("tick", "--dry-run").stdout
 
 
@@ -253,10 +253,10 @@ def test_tick_single_run_settles_and_disables(cli, store, registered, tmp_path):
     assert "would evaluate" not in cli("tick", "--dry-run").stdout
 
 
-def test_tick_repetitive_task_reseeds_after_settle(cli, store, seed_file,
+def test_tick_repetitive_task_starts_new_run_after_settle(cli, store, continuation_file,
                                                    fake_agent, tmp_path):
     cli("register", "repeat-task", "--agent", "claude-code",
-        "--agent-command", fake_agent, "--seed", seed_file())
+        "--agent-command", fake_agent, "--continuation", continuation_file())
     response = tmp_path / "response.txt"
     response.write_text('Cycle done.\n<CONTINUATION>{"schema_version": 1, "step": "end"}</CONTINUATION>')
     cli("tick", env={"FAKE_AGENT_RESPONSE": str(response)})
@@ -265,10 +265,10 @@ def test_tick_repetitive_task_reseeds_after_settle(cli, store, seed_file,
     assert len(runs) == 2
 
 
-def test_tick_missing_agent_binary_logged_stays_pending(cli, store, seed_file):
+def test_tick_missing_agent_binary_logged_stays_pending(cli, store, continuation_file):
     cli("register", "broken-task", "--agent", "claude-code",
         "--agent-command", "/nonexistent/agent",
-        "--seed", seed_file())
+        "--continuation", continuation_file())
     cli("tick")
     entries = [e for e in read_log(store) if e.get("outcome") == "spawn-error"]
     assert entries and entries[-1]["task_id"] == "broken-task"
@@ -297,8 +297,8 @@ def test_tick_respects_run_lock(cli, store, registered, tmp_path):
 
 # ----------------------------------------------------------------- log/verify
 
-def test_log_filters_by_task(cli, store, registered, seed_file):
-    cli("register", "other-task", "--agent", "pi", "--seed", seed_file())
+def test_log_filters_by_task(cli, store, registered, continuation_file):
+    cli("register", "other-task", "--agent", "pi", "--continuation", continuation_file())
     out = cli("log", "--task", registered).stdout
     assert "other-task" not in out and registered in out
 

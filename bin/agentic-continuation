@@ -13,7 +13,7 @@ Store (override with AGENTIC_CONTINUATION_STORE):
   ~/.local/share/agentic-continuation/
     registry.json                     tasks: id, agent, policy, rules
     log.jsonl                         THE log — every CLI invocation
-    tasks/<task-id>/continuation.md   seed (first continuation of each run)
+    tasks/<task-id>/continuation.md   the task continuation (first of each run)
     tasks/<task-id>/runs/<run-id>/    run workspace (agent cwd)
       continuations/<cid>.md          continuation documents
       continuations/<cid>.state.json  status, evaluation timestamps
@@ -440,15 +440,15 @@ def register_continuation(task_id: str, run_id: str, core: dict,
 
 
 def start_run(task_id: str, task: dict) -> tuple[str, str]:
-    seed_path = task_dir(task_id) / "continuation.md"
-    core = parse_document_core(seed_path.read_text(encoding="utf-8"))
+    task_continuation = task_dir(task_id) / "continuation.md"
+    core = parse_document_core(task_continuation.read_text(encoding="utf-8"))
     run_id = stamp()
     seq = 2
     while run_dir(task_id, run_id).exists():
-        run_id = f"{stamp()}-{seq}"  # same-second re-seed must not reuse a run
+        run_id = f"{stamp()}-{seq}"  # same-second run start must not reuse a run
         seq += 1
     run_dir(task_id, run_id).mkdir(parents=True, exist_ok=True)
-    cid = register_continuation(task_id, run_id, core, task.get("must_not", []), "seed")
+    cid = register_continuation(task_id, run_id, core, task.get("must_not", []), "task-continuation")
     return run_id, cid
 
 
@@ -531,11 +531,13 @@ def spawn_agent(task: dict, task_id: str, run_id: str, cid: str,
 def cmd_register(args) -> int:
     if not KEBAB.fullmatch(args.task_id):
         raise SystemExit("task id must be kebab-case")
-    seed_raw = sys.stdin.read() if args.seed == "-" else Path(args.seed).read_text()
-    core = json.loads(seed_raw)
+    raw = sys.stdin.read() if args.continuation == "-" else Path(args.continuation).read_text()
+    core = json.loads(raw)
     problem = validate_core(core)
     if problem or is_terminal(core):
-        raise SystemExit(f"invalid seed: {problem or 'terminal block cannot seed a task'}")
+        raise SystemExit(
+            "invalid continuation: "
+            + (problem or "a terminal block cannot be a task continuation"))
     with StoreLock():
         registry = load_registry()
         if args.task_id in registry["tasks"] and not args.force:
@@ -559,8 +561,8 @@ def cmd_register(args) -> int:
         save_registry(registry)
     append_log({"cmd": "register", "task_id": args.task_id, "actor": args.actor,
                 "outcome": "ok", "agent": args.agent,
-                "seed_step": core["step"], "single_run": bool(args.single_run)})
-    print(f"registered {args.task_id} (agent {args.agent}, seed step {core['step']})")
+                "continuation_step": core["step"], "single_run": bool(args.single_run)})
+    print(f"registered {args.task_id} (agent {args.agent}, continuation step {core['step']})")
     return 0
 
 
@@ -623,7 +625,7 @@ def cmd_show(args) -> int:
         path = task_dir(args.task_id) / "continuation.md"
     sys.stdout.write(path.read_text(encoding="utf-8"))
     append_log({"cmd": "show", "task_id": args.task_id, "run_id": args.run or "",
-                "continuation_id": args.continuation or "seed",
+                "continuation_id": args.continuation or "task-continuation",
                 "actor": args.actor, "outcome": "ok"})
     return 0
 
@@ -695,9 +697,9 @@ def cmd_tick(args) -> int:
             if run_id is None:
                 if task["single_run"] and list_runs(task_id):
                     continue  # its one run is settled
-                run_id, seed_cid = start_run(task_id, task)
+                run_id, first_cid = start_run(task_id, task)
                 append_log({"cmd": "tick.start-run", "task_id": task_id,
-                            "run_id": run_id, "continuation_id": seed_cid,
+                            "run_id": run_id, "continuation_id": first_cid,
                             "actor": args.actor, "outcome": "ok"})
         lock_path = run_dir(task_id, run_id) / ".run-lock"
         if lock_path.exists():
@@ -875,10 +877,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Who is invoking (human | agent-plugin | dispatcher).")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("register", help="Register a task with a seed continuation.")
+    p = sub.add_parser("register", help="Register a task with its continuation.")
     p.add_argument("task_id")
     p.add_argument("--agent", choices=("claude-code", "pi"), required=True)
-    p.add_argument("--seed", required=True, help="Seed core JSON file, or - for stdin.")
+    p.add_argument("--continuation", required=True,
+                   help="Continuation core JSON file, or - for stdin.")
     p.add_argument("--single-run", action="store_true")
     p.add_argument("--must-not", action="append",
                    help="Task-scoped MUST NOT rule (repeatable), without the prefix.")
