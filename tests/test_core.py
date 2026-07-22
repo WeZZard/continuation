@@ -134,3 +134,20 @@ def test_legacy_top_continuation_layout_still_parses():
     legacy = ("<CONTINUATION>\n" + json.dumps(core) + "\n</CONTINUATION>\n\n"
               "<TASK>\nbody\n</TASK>\n")
     assert ac.parse_document_core(legacy) == core
+
+
+def test_next_activation_states():
+    now = datetime(2026, 7, 23, 10, 0)
+    assert ac.next_activation({"mode": "now"}, None, now)[0] == "due"
+    state, when = ac.next_activation(
+        {"mode": "every", "amount": 12, "unit": "h"}, datetime(2026, 7, 23, 0, 0), now)
+    assert state == "scheduled" and when == datetime(2026, 7, 23, 12, 0)
+    state, when = ac.next_activation(
+        {"mode": "daily", "at": "09:00"}, datetime(2026, 7, 23, 9, 30), now)
+    assert state == "scheduled" and when == datetime(2026, 7, 24, 9, 0)
+    state, _ = ac.next_activation(
+        {"mode": "at", "datetime": "2026-07-23 09:00"}, datetime(2026, 7, 23, 9, 30), now)
+    assert state == "expired"
+    state, _ = ac.next_activation(
+        {"mode": "at", "datetime": "2026-07-23 09:00"}, datetime(2026, 7, 22, 8, 0), now)
+    assert state == "due"

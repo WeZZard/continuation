@@ -347,3 +347,40 @@ def test_tick_fresh_run_lock_still_respected(cli, store, registered, tmp_path):
     capture = tmp_path / "capture.json"
     cli("tick", env={"FAKE_AGENT_CAPTURE": str(capture)})
     assert not capture.exists()
+
+
+# --------------------------------------------------------------------- queue
+
+def test_queue_sections_and_activation_order(cli, store, continuation_file,
+                                             fake_agent):
+    cli("register", "due-task", "--agent", "claude-code",
+        "--agent-command", fake_agent, "--continuation", continuation_file())
+    cli("register", "later-task", "--agent", "claude-code",
+        "--agent-command", fake_agent,
+        "--continuation", continuation_file(schedule={"mode": "daily", "at": "23:59"}))
+    cli("tick", "--dry-run")
+    out = cli("queue").stdout
+    assert "1 due, 1 scheduled, 0 need attention" in out
+    assert out.index("DUE") < out.index("SCHEDULED")
+    queue = json.loads(cli("queue", "--json").stdout)
+    assert queue["due"][0]["task"] == "due-task"
+    assert queue["scheduled"][0]["task"] == "later-task"
+    assert queue["scheduled"][0]["schedule"] == {"mode": "daily", "at": "23:59"}
+
+
+def test_queue_expired_one_shot_needs_attention(cli, store, continuation_file,
+                                                fake_agent, tmp_path):
+    cli("register", "one-shot", "--agent", "claude-code",
+        "--agent-command", fake_agent,
+        "--continuation", continuation_file(
+            schedule={"mode": "at", "datetime": "2020-01-01 00:00"}))
+    response = tmp_path / "response.txt"
+    response.write_text("Checked; nothing to do yet.")
+    cli("tick", env={"FAKE_AGENT_RESPONSE": str(response)})
+    queue = json.loads(cli("queue", "--json").stdout)
+    assert queue["attention"] and queue["attention"][0]["state"] == "expired"
+    assert queue["attention"][0]["last_summary"].startswith("Checked")
+
+
+def test_queue_empty_store(cli):
+    assert "queue is empty" in cli("queue").stdout

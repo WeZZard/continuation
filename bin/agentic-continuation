@@ -358,6 +358,40 @@ def schedule_due(schedule: dict, last_evaluated: datetime | None, now: datetime)
     return False
 
 
+def next_activation(schedule: dict, last_evaluated: datetime | None,
+                    now: datetime) -> tuple[str, datetime | None]:
+    """The queue position of a pending continuation.
+
+    Returns (state, when): ("due", now-ish moment it became actionable),
+    ("scheduled", the future datetime it activates), or ("expired", None)
+    for a one-shot "at" whose moment was evaluated and returned nothing —
+    it will never activate again and needs a human.
+    """
+    from datetime import timedelta
+    last = last_evaluated or datetime(1970, 1, 1)
+    mode = schedule["mode"]
+    if mode == "now":
+        return ("due", now)
+    if mode == "every":
+        unit = {"m": "minutes", "h": "hours", "d": "days"}[schedule["unit"]]
+        mark = last + timedelta(**{unit: schedule["amount"]})
+        return ("due", mark) if now >= mark else ("scheduled", mark)
+    if mode == "daily":
+        hour, minute = map(int, schedule["at"].split(":"))
+        today = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if now >= today and last < today:
+            return ("due", today)
+        return ("scheduled", today if now < today else today + timedelta(days=1))
+    if mode == "at":
+        mark = datetime.strptime(schedule["datetime"], "%Y-%m-%d %H:%M")
+        if now >= mark and last < mark:
+            return ("due", mark)
+        if now < mark:
+            return ("scheduled", mark)
+        return ("expired", None)
+    return ("expired", None)
+
+
 # ------------------------------------------------------------- rendering
 
 def render_task_section(core: dict) -> str:
@@ -837,6 +871,129 @@ def cmd_tick(args) -> int:
     return 0
 
 
+def collect_queue(now: datetime) -> dict:
+    """THE QUEUE: every pending continuation, in activation order.
+
+    Derived fresh from the store — the human-facing (and app-facing) view
+    of what will run, when, in what state. Sections: due (actionable now,
+    oldest activation first), scheduled (future, soonest first), attention
+    (expired one-shots and quarantined invalid documents — a human's move).
+    """
+    last_summaries: dict[tuple, dict] = {}
+    log_path = STORE / "log.jsonl"
+    if log_path.exists():
+        for line in log_path.read_text(encoding="utf-8").splitlines():
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if entry.get("cmd") == "continue":
+                key = (entry.get("task_id"), entry.get("run_id"),
+                       entry.get("continuation_id"))
+                last_summaries[key] = entry
+
+    due, scheduled, attention = [], [], []
+    registry = load_registry()
+    for task_id, task in sorted(registry["tasks"].items()):
+        for run_id in list_runs(task_id):
+            for cid in list_continuations(task_id, run_id):
+                doc_path, state_path = continuation_paths(task_id, run_id, cid)
+                state = load_state(state_path)
+                if state["status"] not in ("pending", "invalid"):
+                    continue
+                entry = {
+                    "task": task_id, "run": run_id, "continuation": cid,
+                    "status": state["status"],
+                    "enabled": task["enabled"],
+                    "evaluations": state["evaluations"],
+                    "zero_return_streak": state.get("zero_return_streak", 0),
+                    "registered_at": state["registered_at"],
+                    "origin": state.get("origin", ""),
+                }
+                log_entry = last_summaries.get((task_id, run_id, cid))
+                if log_entry:
+                    entry["last_summary"] = (log_entry.get("summary") or "")[:200]
+                    entry["last_actor"] = log_entry.get("actor", "")
+                if state["status"] == "invalid":
+                    entry["state"] = "invalid"
+                    attention.append(entry)
+                    continue
+                core = parse_document_core(doc_path.read_text(encoding="utf-8"))
+                last = (datetime.fromisoformat(state["last_evaluated_at"])
+                        .astimezone().replace(tzinfo=None)
+                        if state["last_evaluated_at"] else None)
+                activation_state, when = next_activation(core["schedule"], last, now)
+                entry["schedule"] = core["schedule"]
+                entry["state"] = activation_state
+                entry["activation"] = when.isoformat() if when else None
+                if not task["enabled"]:
+                    entry["state"] = "paused"
+                    attention.append(entry)
+                elif activation_state == "due":
+                    due.append(entry)
+                elif activation_state == "scheduled":
+                    scheduled.append(entry)
+                else:
+                    attention.append(entry)
+    due.sort(key=lambda e: e["activation"] or "")
+    scheduled.sort(key=lambda e: e["activation"] or "")
+    return {"generated_at": now.isoformat(), "due": due,
+            "scheduled": scheduled, "attention": attention}
+
+
+def _format_wait(now: datetime, iso: str | None) -> str:
+    if not iso:
+        return "—"
+    delta = datetime.fromisoformat(iso) - now
+    seconds = int(delta.total_seconds())
+    sign = "in " if seconds >= 0 else ""
+    seconds = abs(seconds)
+    if seconds < 90:
+        text = f"{seconds}s"
+    elif seconds < 5400:
+        text = f"{seconds // 60}m"
+    elif seconds < 90000:
+        text = f"{seconds // 3600}h {seconds % 3600 // 60:02d}m"
+    else:
+        text = f"{seconds // 86400}d {seconds % 86400 // 3600}h"
+    return sign + text if sign else text + " overdue"
+
+
+def cmd_queue(args) -> int:
+    now = now_local()
+    queue = collect_queue(now)
+    if args.json:
+        print(json.dumps(queue, indent=2, ensure_ascii=False))
+        return 0
+    counts = (f"{len(queue['due'])} due, {len(queue['scheduled'])} scheduled, "
+              f"{len(queue['attention'])} need attention")
+    print(f"QUEUE — {counts}")
+    position = 0
+    for section, title in (("due", "DUE"), ("scheduled", "SCHEDULED"),
+                           ("attention", "NEEDS ATTENTION")):
+        entries = queue[section]
+        if not entries:
+            continue
+        print(f"\n{title}")
+        for entry in entries:
+            position += 1
+            when = ("now" if section == "due"
+                    else _format_wait(now, entry.get("activation"))
+                    if section == "scheduled" else entry["state"])
+            schedule = json.dumps(entry.get("schedule", {})) if entry.get("schedule") else ""
+            print(f"{position:3d}. [{when}] {entry['task']} / {entry['run']} / "
+                  f"{entry['continuation']}")
+            detail = (f"     {schedule}  evaluations {entry['evaluations']}"
+                      + (f", streak {entry['zero_return_streak']}"
+                         if entry.get("zero_return_streak") else ""))
+            print(detail)
+            if entry.get("last_summary"):
+                print(f"     last: {entry['last_summary'][:110]}")
+    if position == 0:
+        print("\n(the queue is empty)")
+    return 0
+
+
 def cmd_log(args) -> int:
     path = STORE / "log.jsonl"
     if not path.exists():
@@ -943,6 +1100,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--task")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=cmd_tick)
+
+    p = sub.add_parser("queue", help="THE queue: pending continuations in activation order.")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_queue)
 
     p = sub.add_parser("log", help="Read the audit log.")
     p.add_argument("--task")
