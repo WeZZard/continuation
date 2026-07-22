@@ -1,0 +1,863 @@
+#!/usr/bin/env python3
+"""agentic-continuation — a continuation-passing scheduler for agent tasks.
+
+Concept: evaluating a task's continuation returns zero, one, or a tuple of
+continuations — like a function returning functions. The tool is the
+trampoline: launchd ticks it coarsely; each continuation's own `schedule`
+decides when it is due; a headless agent evaluates it; whatever the agent
+RETURNS (in <CONTINUATION> blocks in its final message) is validated,
+rendered, and registered by this CLI — the single writer. Every subcommand
+invocation appends to the audit log.
+
+Store (override with AGENTIC_CONTINUATION_STORE):
+  ~/.local/share/agentic-continuation/
+    registry.json                     tasks: id, agent, policy, rules
+    log.jsonl                         THE log — every CLI invocation
+    tasks/<task-id>/continuation.md   seed (first continuation of each run)
+    tasks/<task-id>/runs/<run-id>/    run workspace (agent cwd)
+      continuations/<cid>.md          continuation documents
+      continuations/<cid>.state.json  status, evaluation timestamps
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+SCHEMA_VERSION = 1
+SUPPORTED_SCHEMAS = {1}
+CORE_KEYS = {
+    "schema_version", "step", "task", "when_to_stop",
+    "when_to_continue", "context", "schedule",
+}
+END_KEYS = {"schema_version", "step"}
+KEBAB = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+LABEL = "com.wezzard.agent.agentic-continuation"
+
+STORE = Path(
+    os.environ.get("AGENTIC_CONTINUATION_STORE", "~/.local/share/agentic-continuation")
+).expanduser()
+
+# --------------------------------------------------------------------------
+# Program constants of the continuation document. Everything here is
+# byte-identical in every rendered document; agents influence only the
+# values rendered into the marked slots.
+# --------------------------------------------------------------------------
+
+HEADER = (
+    "<!-- rendered by agentic-continuation; do not edit — returned continuations\n"
+    "     replace this file's successors, they do not modify it -->\n"
+)
+
+CONTINUATION_SECTION = """## Continuation
+
+Evaluating this task returns zero, one, or several continuations. Register
+each by including, in your FINAL message, one <CONTINUATION> block per
+continuation, shaped exactly like this. Keep these keys exactly, replace
+placeholder values with observed values, and do not add keys — the tool
+extracts, validates, and registers them; you never write state files:
+
+<CONTINUATION>
+{
+  "schema_version": 1,
+  "step": "...",
+  "task": "...",
+  "when_to_stop": ["..."],
+  "when_to_continue": "...",
+  "context": "...",
+  "schedule": { "mode": "..." }
+}
+</CONTINUATION>
+
+`schema_version` must be exactly 1. `schedule` must be exactly one of the
+schema_version-1 forms:
+
+- `{ "mode": "now" }` — due on the next dispatcher tick
+- `{ "mode": "every", "amount": N, "unit": "m" | "h" | "d" }` — due when that
+  long has passed since the last evaluation
+- `{ "mode": "daily", "at": "HH:MM" }` — due once per day after that local time
+- `{ "mode": "at", "datetime": "YYYY-MM-DD HH:MM" }` — due once, after that
+  local datetime
+
+Returning nothing keeps THIS continuation scheduled: it will be evaluated
+again per its own schedule (that is how a step waits for the world). To end
+this line of work with no successor, return exactly this terminal block:
+
+<CONTINUATION>
+{ "schema_version": 1, "step": "end" }
+</CONTINUATION>
+
+Choose each returned schedule to match what that step actually waits for.
+"""
+
+PRINCIPLES = """**Continuation Design Principles:**
+
+A continuation is a value, not a file you edit: evaluating a task returns
+zero, one, or a tuple of continuations, and the tool consumes what you
+return. Anything the next step needs must be in its `task` or `context` or
+reachable from paths recorded there. Every step tolerates running twice.
+Author returned steps at this document's altitude: goals, verifiable stop
+conditions, pointers — not keystroke scripts.
+
+**MUST:**
+
+- You **MUST** verify this task's preconditions before acting on anything.
+- You **MUST** put returned <CONTINUATION> blocks in your final message only,
+  each a complete JSON object with exactly the keys and schema shown above.
+- You **MUST** record produced artifact paths and measured results in each
+  returned continuation's `context`.
+- You **MUST** state plainly in your final message what you did or why you
+  stopped, before any <CONTINUATION> blocks.
+
+**MUST NOT:**
+
+- You **MUST NOT** write or edit any file under the agentic-continuation
+  store yourself.
+- You **MUST NOT** return a continuation after a failed or partial step.
+- You **MUST NOT** start work outside this task, however useful it seems;
+  note it in your final message instead.
+"""
+
+BLOCK_RE = re.compile(r"<CONTINUATION>\s*(.*?)\s*</CONTINUATION>", re.DOTALL)
+
+
+# ----------------------------------------------------------------- utilities
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def now_local() -> datetime:
+    return datetime.now()
+
+
+def stamp() -> str:
+    return now_utc().strftime("%Y%m%dT%H%M%SZ")
+
+
+class StoreLock:
+    def __enter__(self):
+        STORE.mkdir(parents=True, exist_ok=True)
+        self.fh = open(STORE / ".lock", "w")
+        fcntl.flock(self.fh, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        fcntl.flock(self.fh, fcntl.LOCK_UN)
+        self.fh.close()
+
+
+def atomic_write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+
+def append_log(entry: dict) -> None:
+    entry = {"ts": now_utc().isoformat(), **entry}
+    STORE.mkdir(parents=True, exist_ok=True)
+    with open(STORE / "log.jsonl", "a", encoding="utf-8") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def load_registry() -> dict:
+    path = STORE / "registry.json"
+    if not path.exists():
+        return {"schema_version": 1, "tasks": {}}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def save_registry(registry: dict) -> None:
+    atomic_write(STORE / "registry.json", json.dumps(registry, indent=2, ensure_ascii=False))
+
+
+def notify_things(title: str, notes: str) -> bool:
+    things = shutil.which("things")
+    if not things:
+        return False
+    try:
+        subprocess.run(
+            [things, "add", "--when=today", f"{title}\n{notes}"],
+            check=True, capture_output=True, timeout=30,
+        )
+        return True
+    except (subprocess.SubprocessError, OSError):
+        return False
+
+
+# ------------------------------------------------------- schema + validation
+
+def validate_schedule(schedule) -> str | None:
+    """None when valid; an error string otherwise."""
+    if not isinstance(schedule, dict) or "mode" not in schedule:
+        return "schedule must be an object with a 'mode'"
+    mode = schedule.get("mode")
+    if mode == "now":
+        return None if set(schedule) == {"mode"} else "schedule.now takes no other keys"
+    if mode == "every":
+        if set(schedule) != {"mode", "amount", "unit"}:
+            return "schedule.every requires exactly: mode, amount, unit"
+        if not isinstance(schedule["amount"], int) or schedule["amount"] < 1:
+            return "schedule.every.amount must be a positive integer"
+        if schedule["unit"] not in ("m", "h", "d"):
+            return "schedule.every.unit must be m, h, or d"
+        return None
+    if mode == "daily":
+        if set(schedule) != {"mode", "at"}:
+            return "schedule.daily requires exactly: mode, at"
+        if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", str(schedule["at"])):
+            return "schedule.daily.at must be HH:MM"
+        return None
+    if mode == "at":
+        if set(schedule) != {"mode", "datetime"}:
+            return "schedule.at requires exactly: mode, datetime"
+        try:
+            datetime.strptime(schedule["datetime"], "%Y-%m-%d %H:%M")
+        except (TypeError, ValueError):
+            return "schedule.at.datetime must be YYYY-MM-DD HH:MM"
+        return None
+    return f"unknown schedule mode {mode!r} for schema_version {SCHEMA_VERSION}"
+
+
+def validate_core(core) -> str | None:
+    """None when valid (normal or terminal); an error string otherwise."""
+    if not isinstance(core, dict):
+        return "continuation must be a JSON object"
+    version = core.get("schema_version")
+    if version not in SUPPORTED_SCHEMAS:
+        return f"unsupported schema_version {version!r} (supported: {sorted(SUPPORTED_SCHEMAS)})"
+    if set(core) == END_KEYS and core.get("step") == "end":
+        return None
+    if set(core) != CORE_KEYS:
+        return f"keys must be exactly {sorted(CORE_KEYS)} (got {sorted(core)})"
+    if not (isinstance(core["step"], str) and KEBAB.fullmatch(core["step"])):
+        return "step must be kebab-case"
+    if core["step"] == "end":
+        return "terminal block must carry exactly schema_version and step"
+    for key in ("task", "when_to_continue", "context"):
+        if not (isinstance(core[key], str) and core[key].strip()):
+            return f"{key} must be a non-empty string"
+    stops = core["when_to_stop"]
+    if not (isinstance(stops, list) and stops
+            and all(isinstance(s, str) and s.strip() for s in stops)):
+        return "when_to_stop must be a non-empty list of strings"
+    return validate_schedule(core["schedule"])
+
+
+def is_terminal(core: dict) -> bool:
+    return set(core) == END_KEYS and core.get("step") == "end"
+
+
+def extract_blocks(text: str) -> tuple[list[dict], list[str]]:
+    """All <CONTINUATION> blocks in `text` → (valid cores, errors)."""
+    cores, errors = [], []
+    for raw in BLOCK_RE.findall(text or ""):
+        try:
+            core = json.loads(raw)
+        except json.JSONDecodeError as error:
+            errors.append(f"invalid JSON in block: {error}")
+            continue
+        problem = validate_core(core)
+        if problem:
+            errors.append(problem)
+        else:
+            cores.append(core)
+    return cores, errors
+
+
+def schedule_due(schedule: dict, last_evaluated: datetime | None, now: datetime) -> bool:
+    last = last_evaluated or datetime(1970, 1, 1)
+    mode = schedule["mode"]
+    if mode == "now":
+        return True
+    if mode == "every":
+        from datetime import timedelta
+        unit = {"m": "minutes", "h": "hours", "d": "days"}[schedule["unit"]]
+        return now - last >= timedelta(**{unit: schedule["amount"]})
+    if mode == "daily":
+        hour, minute = map(int, schedule["at"].split(":"))
+        mark = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        return now >= mark and last < mark
+    if mode == "at":
+        mark = datetime.strptime(schedule["datetime"], "%Y-%m-%d %H:%M")
+        return now >= mark and last < mark
+    return False
+
+
+# ------------------------------------------------------------- rendering
+
+def render_task_section(core: dict) -> str:
+    stops = "\n".join(f"- {item}" for item in core["when_to_stop"])
+    return (
+        f"## Task\n\n{core['task']}\n\n"
+        f"**Context from the previous step:** {core['context']}\n\n"
+        f"## When to Stop\n\n{stops}\n\n"
+        f"{CONTINUATION_SECTION}\n"
+        f"## When to Continue\n\n{core['when_to_continue']}\n"
+    )
+
+
+def render_document(core: dict, task_rules: list[str]) -> str:
+    rules = "".join(f"- You **MUST NOT** {rule}\n" for rule in task_rules)
+    principles = PRINCIPLES + rules if rules else PRINCIPLES
+    body = render_task_section(core)
+    return (
+        HEADER
+        + "\n<CONTINUATION>\n"
+        + json.dumps(core, indent=2, ensure_ascii=False)
+        + "\n</CONTINUATION>\n\n"
+        + "<TASK>\n````markdown\n"
+        + body
+        + "````\n</TASK>\n\n"
+        + principles
+    )
+
+
+def parse_document_core(text: str) -> dict:
+    """The top-level core: the first <CONTINUATION> block before <TASK>."""
+    head = text.split("<TASK>", 1)[0]
+    blocks = BLOCK_RE.findall(head)
+    if len(blocks) != 1:
+        raise ValueError(f"expected one core block before <TASK>, found {len(blocks)}")
+    core = json.loads(blocks[0])
+    problem = validate_core(core)
+    if problem:
+        raise ValueError(problem)
+    return core
+
+
+# ------------------------------------------------------------- store model
+
+def task_dir(task_id: str) -> Path:
+    return STORE / "tasks" / task_id
+
+
+def run_dir(task_id: str, run_id: str) -> Path:
+    return task_dir(task_id) / "runs" / run_id
+
+
+def continuation_paths(task_id: str, run_id: str, cid: str) -> tuple[Path, Path]:
+    base = run_dir(task_id, run_id) / "continuations"
+    return base / f"{cid}.md", base / f"{cid}.state.json"
+
+
+def load_state(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def list_runs(task_id: str) -> list[str]:
+    runs = task_dir(task_id) / "runs"
+    return sorted(p.name for p in runs.iterdir() if p.is_dir()) if runs.exists() else []
+
+
+def list_continuations(task_id: str, run_id: str) -> list[str]:
+    base = run_dir(task_id, run_id) / "continuations"
+    return sorted(p.stem for p in base.glob("*.md")) if base.exists() else []
+
+
+def new_cid(task_id: str, run_id: str, step: str) -> str:
+    existing = list_continuations(task_id, run_id)
+    seq = 1
+    while f"{step}--{seq:02d}" in existing:
+        seq += 1
+    return f"{step}--{seq:02d}"
+
+
+def register_continuation(task_id: str, run_id: str, core: dict,
+                          task_rules: list[str], origin: str) -> str:
+    cid = new_cid(task_id, run_id, core["step"])
+    doc_path, state_path = continuation_paths(task_id, run_id, cid)
+    atomic_write(doc_path, render_document(core, task_rules))
+    atomic_write(state_path, json.dumps({
+        "status": "pending",
+        "registered_at": now_utc().isoformat(),
+        "origin": origin,
+        "evaluations": 0,
+        "last_evaluated_at": None,
+        "zero_return_streak": 0,
+    }, indent=2))
+    return cid
+
+
+def start_run(task_id: str, task: dict) -> tuple[str, str]:
+    seed_path = task_dir(task_id) / "continuation.md"
+    core = parse_document_core(seed_path.read_text(encoding="utf-8"))
+    run_id = stamp()
+    run_dir(task_id, run_id).mkdir(parents=True, exist_ok=True)
+    cid = register_continuation(task_id, run_id, core, task.get("must_not", []), "seed")
+    return run_id, cid
+
+
+def run_is_settled(task_id: str, run_id: str) -> bool:
+    """True when the run has no pending continuations left."""
+    for cid in list_continuations(task_id, run_id):
+        _, state_path = continuation_paths(task_id, run_id, cid)
+        if load_state(state_path)["status"] == "pending":
+            return False
+    return True
+
+
+def active_run(task_id: str) -> str | None:
+    for run_id in reversed(list_runs(task_id)):
+        if not run_is_settled(task_id, run_id):
+            return run_id
+    return None
+
+
+# ------------------------------------------------------------- agents
+
+def spawn_agent(task: dict, task_id: str, run_id: str, cid: str,
+                prompt: str, workdir: Path) -> tuple[int, str, str]:
+    """Run the agent over the prompt. Returns (exit, final_text, session_ref)."""
+    repo_root = Path(__file__).resolve().parent.parent
+    env = {
+        **os.environ,
+        "AGENTIC_TASK_ID": task_id,
+        "AGENTIC_RUN_ID": run_id,
+        "AGENTIC_CONTINUATION_ID": cid,
+        "AGENTIC_CLI": str(Path(__file__).resolve()),
+        "AGENTIC_CONTINUATION_STORE": str(STORE),
+    }
+    agent = task["agent"]
+    if agent == "claude-code":
+        cmd = [
+            task.get("agent_command", "claude"),
+            "-p", "--output-format", "json",
+            "--permission-mode", "auto",
+            "--plugin-dir", str(repo_root / "plugins" / "claude-code"),
+        ]
+        proc = subprocess.run(
+            cmd, input=prompt, text=True, capture_output=True,
+            cwd=workdir, env=env, timeout=task.get("timeout_seconds", 3600),
+        )
+        final_text, session_ref = proc.stdout, ""
+        try:
+            payload = json.loads(proc.stdout)
+            final_text = payload.get("result", proc.stdout)
+            session_ref = payload.get("session_id", "")
+        except (json.JSONDecodeError, AttributeError):
+            pass
+        return proc.returncode, final_text, session_ref
+    if agent == "pi":
+        cmd = [task.get("agent_command", "pi"), "-p", "--mode", "json", prompt]
+        proc = subprocess.run(
+            cmd, text=True, capture_output=True,
+            cwd=workdir, env=env, timeout=task.get("timeout_seconds", 3600),
+        )
+        final_text = proc.stdout
+        try:
+            events = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
+            texts = [
+                part.get("text", "")
+                for event in events
+                if isinstance(event, dict) and event.get("role") == "assistant"
+                for part in (event.get("content") or [])
+                if isinstance(part, dict)
+            ]
+            if texts:
+                final_text = texts[-1]
+        except json.JSONDecodeError:
+            pass
+        return proc.returncode, final_text, ""
+    raise SystemExit(f"unknown agent {agent!r}")
+
+
+# ------------------------------------------------------------- subcommands
+
+def cmd_register(args) -> int:
+    if not KEBAB.fullmatch(args.task_id):
+        raise SystemExit("task id must be kebab-case")
+    seed_raw = sys.stdin.read() if args.seed == "-" else Path(args.seed).read_text()
+    core = json.loads(seed_raw)
+    problem = validate_core(core)
+    if problem or is_terminal(core):
+        raise SystemExit(f"invalid seed: {problem or 'terminal block cannot seed a task'}")
+    with StoreLock():
+        registry = load_registry()
+        if args.task_id in registry["tasks"] and not args.force:
+            raise SystemExit(f"task {args.task_id} already registered (--force to replace)")
+        registry["tasks"][args.task_id] = {
+            "agent": args.agent,
+            "single_run": bool(args.single_run),
+            "enabled": True,
+            "must_not": args.must_not or [],
+            "sandbox": {
+                "allow_write": args.allow_write or [],
+                "allow_net": args.allow_net or [],
+                "enforced": False,
+            },
+            "registered_at": now_utc().isoformat(),
+        }
+        atomic_write(task_dir(args.task_id) / "continuation.md",
+                     render_document(core, args.must_not or []))
+        save_registry(registry)
+    append_log({"cmd": "register", "task_id": args.task_id, "actor": args.actor,
+                "outcome": "ok", "agent": args.agent,
+                "seed_step": core["step"], "single_run": bool(args.single_run)})
+    print(f"registered {args.task_id} (agent {args.agent}, seed step {core['step']})")
+    return 0
+
+
+def cmd_unregister(args) -> int:
+    with StoreLock():
+        registry = load_registry()
+        if args.task_id not in registry["tasks"]:
+            raise SystemExit(f"unknown task {args.task_id}")
+        del registry["tasks"][args.task_id]
+        save_registry(registry)
+    append_log({"cmd": "unregister", "task_id": args.task_id, "actor": args.actor,
+                "outcome": "ok", "note": "task data retained in store"})
+    print(f"unregistered {args.task_id} (data retained under {task_dir(args.task_id)})")
+    return 0
+
+
+def cmd_list(args) -> int:
+    registry = load_registry()
+    now = now_local()
+    if not registry["tasks"]:
+        print("no tasks registered")
+        return 0
+    for task_id, task in sorted(registry["tasks"].items()):
+        run_id = active_run(task_id)
+        flags = [task["agent"]]
+        if task["single_run"]:
+            flags.append("single-run")
+        if not task["enabled"]:
+            flags.append("DISABLED")
+        print(f"{task_id}  [{', '.join(flags)}]")
+        if run_id is None:
+            done_runs = len(list_runs(task_id))
+            print(f"  no active run ({done_runs} settled run(s))")
+            continue
+        print(f"  run {run_id}")
+        for cid in list_continuations(task_id, run_id):
+            doc_path, state_path = continuation_paths(task_id, run_id, cid)
+            state = load_state(state_path)
+            if state["status"] != "pending":
+                print(f"    {cid}: {state['status']}")
+                continue
+            core = parse_document_core(doc_path.read_text(encoding="utf-8"))
+            last = (datetime.fromisoformat(state["last_evaluated_at"]).astimezone().replace(tzinfo=None)
+                    if state["last_evaluated_at"] else None)
+            due = schedule_due(core["schedule"], last, now)
+            print(f"    {cid}: pending, schedule {json.dumps(core['schedule'])}, "
+                  f"evaluations {state['evaluations']}, {'DUE' if due else 'not due'}")
+    append_log({"cmd": "list", "actor": args.actor, "outcome": "ok"})
+    return 0
+
+
+def cmd_show(args) -> int:
+    if args.continuation and args.run:
+        path, _ = continuation_paths(args.task_id, args.run, args.continuation)
+    else:
+        path = task_dir(args.task_id) / "continuation.md"
+    sys.stdout.write(path.read_text(encoding="utf-8"))
+    append_log({"cmd": "show", "task_id": args.task_id, "run_id": args.run or "",
+                "continuation_id": args.continuation or "seed",
+                "actor": args.actor, "outcome": "ok"})
+    return 0
+
+
+def cmd_continue(args) -> int:
+    """Register the continuations an agent RETURNED (blocks in final text)."""
+    text = sys.stdin.read()
+    cores, errors = extract_blocks(text)
+    summary = BLOCK_RE.split(text)[0].strip()[-2000:]
+    with StoreLock():
+        registry = load_registry()
+        task = registry["tasks"].get(args.task_id)
+        if task is None:
+            raise SystemExit(f"unknown task {args.task_id}")
+        _, state_path = continuation_paths(args.task_id, args.run, args.from_id)
+        state = load_state(state_path)
+        state["evaluations"] += 1
+        state["last_evaluated_at"] = now_utc().isoformat()
+        registered, ended = [], False
+        if any(is_terminal(core) for core in cores):
+            state["status"] = "ended"
+            state["zero_return_streak"] = 0
+            ended = True
+        normal = [core for core in cores if not is_terminal(core)]
+        if normal:
+            state["status"] = "consumed"
+            state["zero_return_streak"] = 0
+            for core in normal:
+                cid = register_continuation(
+                    args.task_id, args.run, core, task.get("must_not", []),
+                    origin=args.from_id)
+                registered.append(cid)
+        if not cores:
+            state["zero_return_streak"] = state.get("zero_return_streak", 0) + 1
+        atomic_write(state_path, json.dumps(state, indent=2))
+    append_log({
+        "cmd": "continue", "task_id": args.task_id, "run_id": args.run,
+        "continuation_id": args.from_id, "actor": args.actor,
+        "outcome": "ok" if not errors else "partial",
+        "returned": registered, "ended_line": ended,
+        "invalid_blocks": errors, "summary": summary,
+        "session_ref": args.session_ref or "",
+    })
+    if errors:
+        notify_things(
+            f"[{args.task_id}] invalid continuation returns",
+            f"run {args.run}, from {args.from_id}: " + " | ".join(errors)
+            + f"\nagentic-continuation log --task {args.task_id} --run {args.run}",
+        )
+    for cid in registered:
+        print(cid)
+    return 0
+
+
+def cmd_tick(args) -> int:
+    registry = load_registry()
+    now = now_local()
+    evaluated = []
+    for task_id, task in sorted(registry["tasks"].items()):
+        if args.task and task_id != args.task:
+            continue
+        if not task["enabled"]:
+            continue
+        with StoreLock():
+            run_id = active_run(task_id)
+            if run_id is None:
+                if task["single_run"] and list_runs(task_id):
+                    continue  # its one run is settled
+                run_id, seed_cid = start_run(task_id, task)
+                append_log({"cmd": "tick.start-run", "task_id": task_id,
+                            "run_id": run_id, "continuation_id": seed_cid,
+                            "actor": args.actor, "outcome": "ok"})
+        lock_path = run_dir(task_id, run_id) / ".run-lock"
+        if lock_path.exists():
+            continue  # an evaluation of this run is already in flight
+        for cid in list_continuations(task_id, run_id):
+            doc_path, state_path = continuation_paths(task_id, run_id, cid)
+            state = load_state(state_path)
+            if state["status"] != "pending":
+                continue
+            core = parse_document_core(doc_path.read_text(encoding="utf-8"))
+            last = (datetime.fromisoformat(state["last_evaluated_at"]).astimezone().replace(tzinfo=None)
+                    if state["last_evaluated_at"] else None)
+            if not schedule_due(core["schedule"], last, now):
+                continue
+            if args.dry_run:
+                print(f"would evaluate {task_id}/{run_id}/{cid}")
+                evaluated.append(f"{task_id}/{run_id}/{cid}")
+                continue
+            prompt = doc_path.read_text(encoding="utf-8")
+            workdir = run_dir(task_id, run_id)
+            atomic_write(lock_path, stamp())
+            try:
+                code, final_text, session_ref = spawn_agent(
+                    task, task_id, run_id, cid, prompt, workdir)
+            except (subprocess.SubprocessError, OSError) as error:
+                append_log({"cmd": "tick.evaluate", "task_id": task_id,
+                            "run_id": run_id, "continuation_id": cid,
+                            "actor": args.actor, "outcome": "spawn-error",
+                            "error": str(error)})
+                notify_things(f"[{task_id}] agent spawn failed",
+                              f"{cid}: {error}")
+                lock_path.unlink(missing_ok=True)
+                continue
+            finally:
+                lock_path.unlink(missing_ok=True)
+            append_log({"cmd": "tick.evaluate", "task_id": task_id,
+                        "run_id": run_id, "continuation_id": cid,
+                        "actor": args.actor, "outcome": "ok" if code == 0 else f"agent-exit-{code}",
+                        "session_ref": session_ref})
+            # The claude-code stop-hook plugin normally performs `continue`
+            # during the run. If it did not (state unchanged), fall back to
+            # extracting from the captured final message here.
+            state_after = load_state(state_path)
+            if state_after["evaluations"] == state["evaluations"]:
+                continue_args = argparse.Namespace(
+                    task_id=task_id, run=run_id, from_id=cid,
+                    actor="dispatcher-fallback", session_ref=session_ref)
+                stdin_backup = sys.stdin
+                sys.stdin = __import__("io").StringIO(final_text)
+                try:
+                    cmd_continue(continue_args)
+                finally:
+                    sys.stdin = stdin_backup
+            evaluated.append(f"{task_id}/{run_id}/{cid}")
+            state_after = load_state(state_path)
+            streak = state_after.get("zero_return_streak", 0)
+            if streak and streak % 5 == 0:
+                notify_things(
+                    f"[{task_id}] possibly stuck",
+                    f"{cid} evaluated {streak} times with no return.\n"
+                    f"agentic-continuation log --task {task_id} --run {run_id}",
+                )
+        with StoreLock():
+            if run_is_settled(task_id, run_id):
+                notify_things(
+                    f"[{task_id}] run complete",
+                    f"run {run_id} settled — every line of work ended.\n"
+                    f"agentic-continuation log --task {task_id} --run {run_id}",
+                )
+                append_log({"cmd": "tick.run-settled", "task_id": task_id,
+                            "run_id": run_id, "actor": args.actor, "outcome": "ok"})
+                if task["single_run"]:
+                    registry = load_registry()
+                    registry["tasks"][task_id]["enabled"] = False
+                    save_registry(registry)
+    append_log({"cmd": "tick", "actor": args.actor,
+                "outcome": "ok", "evaluated": evaluated,
+                "dry_run": bool(args.dry_run)})
+    if args.dry_run and not evaluated:
+        print("nothing due")
+    return 0
+
+
+def cmd_log(args) -> int:
+    path = STORE / "log.jsonl"
+    if not path.exists():
+        print("no log yet")
+        return 0
+    shown = 0
+    lines = path.read_text(encoding="utf-8").splitlines()
+    for line in lines[-args.limit * 5:] if args.limit else lines:
+        entry = json.loads(line)
+        if args.task and entry.get("task_id") != args.task:
+            continue
+        if args.run and entry.get("run_id") != args.run:
+            continue
+        print(json.dumps(entry, ensure_ascii=False))
+        shown += 1
+    if args.limit and shown > args.limit:
+        pass
+    return 0
+
+
+def cmd_verify(args) -> int:
+    """Heuristic v1: stat absolute paths mentioned in consumed contexts."""
+    findings = []
+    for run_id in list_runs(args.task_id):
+        for cid in list_continuations(args.task_id, run_id):
+            doc_path, state_path = continuation_paths(args.task_id, run_id, cid)
+            if load_state(state_path)["status"] == "pending":
+                continue
+            core = parse_document_core(doc_path.read_text(encoding="utf-8"))
+            for match in re.findall(r"(?:~|/)[\w./~-]+", core["context"]):
+                path = Path(match).expanduser()
+                if path.suffix or path.exists():
+                    findings.append((f"{run_id}/{cid}", str(path), path.exists()))
+    for where, path, exists in findings:
+        print(f"{'OK  ' if exists else 'MISS'} {where}: {path}")
+    append_log({"cmd": "verify", "task_id": args.task_id, "actor": args.actor,
+                "outcome": "ok",
+                "missing": [p for _, p, ok in findings if not ok]})
+    return 0 if all(ok for *_, ok in findings) else 1
+
+
+def cmd_install_launchd(args) -> int:
+    plist_src = Path(__file__).resolve().parent.parent / "launchd" / f"{LABEL}.plist"
+    dest = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+    shutil.copyfile(plist_src, dest)
+    subprocess.run(["launchctl", "unload", str(dest)], capture_output=True)
+    subprocess.run(["launchctl", "load", str(dest)], check=True)
+    append_log({"cmd": "install-launchd", "actor": args.actor, "outcome": "ok"})
+    print(f"loaded {LABEL} (tick every 30 min)")
+    return 0
+
+
+def cmd_uninstall_launchd(args) -> int:
+    dest = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+    subprocess.run(["launchctl", "unload", str(dest)], capture_output=True)
+    dest.unlink(missing_ok=True)
+    append_log({"cmd": "uninstall-launchd", "actor": args.actor, "outcome": "ok"})
+    print(f"unloaded and removed {LABEL}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="agentic-continuation", description=__doc__)
+    parser.add_argument("--actor", default="human",
+                        help="Who is invoking (human | agent-plugin | dispatcher).")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("register", help="Register a task with a seed continuation.")
+    p.add_argument("task_id")
+    p.add_argument("--agent", choices=("claude-code", "pi"), required=True)
+    p.add_argument("--seed", required=True, help="Seed core JSON file, or - for stdin.")
+    p.add_argument("--single-run", action="store_true")
+    p.add_argument("--must-not", action="append",
+                   help="Task-scoped MUST NOT rule (repeatable), without the prefix.")
+    p.add_argument("--allow-write", action="append")
+    p.add_argument("--allow-net", action="append")
+    p.add_argument("--force", action="store_true")
+    p.set_defaults(fn=cmd_register)
+
+    p = sub.add_parser("unregister", help="Remove a task from the registry.")
+    p.add_argument("task_id")
+    p.set_defaults(fn=cmd_unregister)
+
+    p = sub.add_parser("list", help="Tasks, runs, continuations, due-state.")
+    p.set_defaults(fn=cmd_list)
+
+    p = sub.add_parser("show", help="Print a continuation document.")
+    p.add_argument("task_id")
+    p.add_argument("--run")
+    p.add_argument("--continuation")
+    p.set_defaults(fn=cmd_show)
+
+    p = sub.add_parser("continue", help="Register an agent's returned continuations (stdin: final message).")
+    p.add_argument("task_id")
+    p.add_argument("--run", required=True)
+    p.add_argument("--from", dest="from_id", required=True)
+    p.add_argument("--session-ref", default="")
+    p.set_defaults(fn=cmd_continue)
+
+    p = sub.add_parser("tick", help="Evaluate every due continuation.")
+    p.add_argument("--task")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=cmd_tick)
+
+    p = sub.add_parser("log", help="Read the audit log.")
+    p.add_argument("--task")
+    p.add_argument("--run")
+    p.add_argument("-n", dest="limit", type=int, default=0)
+    p.set_defaults(fn=cmd_log)
+
+    p = sub.add_parser("verify", help="Check artifact paths claimed in contexts.")
+    p.add_argument("task_id")
+    p.set_defaults(fn=cmd_verify)
+
+    p = sub.add_parser("install-launchd", help="Install + load the tick schedule.")
+    p.set_defaults(fn=cmd_install_launchd)
+    p = sub.add_parser("uninstall-launchd", help="Unload + remove the tick schedule.")
+    p.set_defaults(fn=cmd_uninstall_launchd)
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    try:
+        return args.fn(args)
+    except SystemExit:
+        raise
+    except Exception as error:  # noqa: BLE001 — audit trail before dying
+        append_log({"cmd": getattr(args, "cmd", "?"), "actor": args.actor,
+                    "outcome": "error", "error": f"{type(error).__name__}: {error}"})
+        raise
+
+
+if __name__ == "__main__":
+    sys.exit(main())

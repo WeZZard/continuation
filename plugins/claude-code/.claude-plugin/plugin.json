@@ -1,0 +1,5 @@
+{
+  "name": "agentic-continuation",
+  "version": "0.1.0",
+  "description": "Performs the continuation passing when the agent stops: extracts <CONTINUATION> blocks the agent returned in its final message and registers them through the agentic-continuation CLI (the single writer)."
+}
