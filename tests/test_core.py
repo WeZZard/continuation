@@ -173,6 +173,9 @@ def test_schedule_skill_carries_no_grammar_copy():
     assert "--actor interactive-agent" in skill
     assert '"schema_version"' not in skill     # no core shape copy
     assert '"mode"' not in skill               # no schedule grammar copy
+    # The CLI on PATH is the contract; machine paths make it undistributable.
+    assert "command -v agentic-continuation" in skill
+    assert "Artifacts/Repositories" not in skill
 
 
 def test_plugin_manifests_agree():

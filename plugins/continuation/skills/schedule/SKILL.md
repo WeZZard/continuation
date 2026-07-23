@@ -12,10 +12,13 @@ it to the CLI — the CLI is the single writer of scheduler state. You never
 write anything under its store.
 
 ```bash
-BIN="$HOME/Artifacts/Repositories/com.github/WeZZard/agentic-continuation/bin/agentic-continuation"
+BIN="$(command -v agentic-continuation)"
 ```
 
-The path is identical on every machine of the fleet.
+The CLI on PATH is the contract — the skill carries no machine paths. If
+`command -v` finds nothing, the tool is not installed here: stop and tell
+the user to clone the repo and link it, e.g.
+`ln -sfn "<repo>/bin/agentic-continuation" ~/.local/bin/agentic-continuation`.
 
 ## When NOT to use this
 
@@ -27,10 +30,11 @@ The path is identical on every machine of the fleet.
 
 ## Steps
 
-1. **Preflight.** `launchctl list | grep agentic-continuation` — if that
-   prints nothing, the scheduler is not ticking on this machine:
-   registration still lands in the queue, but nothing will evaluate it.
-   Tell the user and point at `"$BIN" install-launchd`.
+1. **Preflight.** Resolve `BIN` as above — no CLI, no dispatch. Then
+   `launchctl list | grep agentic-continuation` — if that prints nothing,
+   the scheduler is not ticking on this machine: registration still lands
+   in the queue, but nothing will evaluate it. Tell the user and point at
+   `"$BIN" install-launchd`.
 
 2. **Fetch the grammar.** Run `"$BIN" authoring` and follow it exactly.
    Never author a core from memory: the CLI is the single truth for the

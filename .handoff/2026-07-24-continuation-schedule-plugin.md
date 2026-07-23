@@ -77,6 +77,20 @@ with the user first).
   interactive sessions register via the skill with user approval; never
   `continue`/`tick`, never HTTP).
 
+## Addendum: distributability (same day)
+
+- The skill's hardcoded `$HOME/Artifacts/...` BIN path made the plugin
+  undistributable (user flagged it; a marketplace-cached install does not
+  even sit next to the CLI). Ruling: **the CLI on PATH is the contract.**
+  The skill resolves `command -v agentic-continuation` and stops with
+  install guidance when absent; a test bans machine paths from the skill.
+  This Mac: `~/.local/bin/agentic-continuation` → repo bin (installed,
+  verified). Fleet installs need the same one-time link.
+- Repo pushed to the new **private** remote `github.com/WeZZard/continuation`
+  (`origin`, SSH). Local dir name still `agentic-continuation` — renaming
+  is a coordinated migration (paths are load-bearing in CLAUDE.md, launchd
+  plists, pi's package reference, the minis' mirror), deliberately not done.
+
 ## Not done / open
 
 - **Not published to the wezzard-skills marketplace** — that catalog pins

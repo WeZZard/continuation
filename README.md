@@ -44,7 +44,9 @@ returning functions — and this tool is the trampoline that consumes them.
 ## Quick start
 
 ```bash
-BIN=~/Artifacts/Repositories/com.github/WeZZard/agentic-continuation/bin/agentic-continuation
+# Put the CLI on PATH once — plugins and skills resolve it from there.
+ln -sfn "$PWD/bin/agentic-continuation" ~/.local/bin/agentic-continuation
+BIN=agentic-continuation
 
 # Register a task from a continuation core (7-key JSON)
 $BIN register my-task --agent claude-code --single-run \
@@ -159,11 +161,15 @@ invocation, never an HTTP write. Sessions spawned BY the dispatcher
 (`AGENTIC_TASK_ID` in the environment) never use the skill; they return
 `<CONTINUATION>` blocks exactly as their document instructs.
 
+The skill locates the CLI with `command -v agentic-continuation` — the
+CLI on PATH is the contract, so the plugin carries no machine paths and
+installs from any clone location (see Quick start for the one-time link).
+
 The repo root doubles as a Claude Code plugin marketplace
 (`.claude-plugin/marketplace.json`):
 
 ```bash
-claude plugin marketplace add ~/Artifacts/Repositories/com.github/WeZZard/agentic-continuation
+claude plugin marketplace add <repo-dir>
 claude plugin install continuation@agentic-continuation
 ```
 
@@ -171,7 +177,7 @@ The same directory is also a pi package (`package.json` carries the `pi`
 manifest pointing at the same skill — one SKILL.md, two manifests):
 
 ```bash
-pi install ~/Artifacts/Repositories/com.github/WeZZard/agentic-continuation/plugins/continuation
+pi install <repo-dir>/plugins/continuation
 ```
 
 Claude Code caches the installed plugin by version: after editing the
