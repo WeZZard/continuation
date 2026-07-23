@@ -27,9 +27,9 @@ struct RootView: View {
         case .all:
             UnifiedQueueView(scope: .all, selection: $detail)
                 .navigationTitle("All Continuations")
-        case .attention:
-            UnifiedQueueView(scope: .attention, selection: $detail)
-                .navigationTitle("Needs Attention")
+        case .state(let state):
+            UnifiedQueueView(scope: .state(state), selection: $detail)
+                .navigationTitle(state.capitalized)
         case .activity:
             ActivityView()
                 .navigationTitle("Activity")
@@ -65,6 +65,8 @@ struct RootView: View {
 
 extension FleetStore {
     func entry(id: String) -> FleetEntry? {
-        (dueEntries + scheduledEntries + attentionEntries).first { $0.id == id }
+        (dueEntries + scheduledEntries
+         + StuckState.all.flatMap { entries(state: $0) })
+            .first { $0.id == id }
     }
 }

@@ -37,7 +37,23 @@ enum DetailSelection: Hashable {
 
 enum SidebarSelection: Hashable {
     case all
-    case attention
+    case state(String)                       // "expired" | "invalid" | "paused"
     case activity
     case node(String)                        // NodeState.key
+}
+
+/// The piles of entries the scheduler will not act on by itself — three
+/// distinct sections, each named exactly what it is, shown only when
+/// non-empty. Never an umbrella.
+enum StuckState {
+    static let all = ["expired", "invalid", "paused"]
+
+    static func icon(_ state: String) -> String {
+        switch state {
+        case "expired": return "clock.badge.exclamationmark"
+        case "invalid": return "xmark.octagon"
+        case "paused": return "pause.circle"
+        default: return "questionmark.circle"
+        }
+    }
 }

@@ -132,11 +132,22 @@ public final class FleetStore: ObservableObject {
         }
     }
 
-    public var attentionEntries: [FleetEntry] {
-        collect(\.attention).sorted { $0.entry.registeredAt < $1.entry.registeredAt }
+    /// Entries the scheduler will not act on by itself, one pile per state
+    /// (`expired` / `invalid` / `paused`) — distinct sections, no umbrella.
+    public func entries(state: String) -> [FleetEntry] {
+        collect(\.attention)
+            .filter { $0.entry.state == state }
+            .sorted { $0.entry.registeredAt < $1.entry.registeredAt }
     }
 
-    public var attentionCount: Int { attentionEntries.count }
+    /// (state, count) for every non-empty stuck pile, in canonical order.
+    public var stuckCounts: [(state: String, count: Int)] {
+        ["expired", "invalid", "paused"].compactMap { state in
+            let count = entries(state: state).count
+            return count > 0 ? (state, count) : nil
+        }
+    }
+
     public var dueCount: Int { dueEntries.count }
 
     /// What the menu bar counts down to: the soonest scheduled activation,

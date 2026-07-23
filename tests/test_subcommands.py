@@ -350,7 +350,8 @@ def test_queue_sections_and_activation_order(cli, store, continuation_file,
         "--continuation", continuation_file(schedule={"mode": "daily", "at": "23:59"}))
     cli("tick", "--dry-run")
     out = cli("queue").stdout
-    assert "1 due, 1 scheduled, 0 need attention" in out
+    assert "1 due, 1 scheduled" in out
+    assert "attention" not in out  # empty state piles are not printed
     assert out.index("DUE") < out.index("SCHEDULED")
     queue = json.loads(cli("queue", "--json").stdout)
     assert queue["due"][0]["task"] == "due-task"

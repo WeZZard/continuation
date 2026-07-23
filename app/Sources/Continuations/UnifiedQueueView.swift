@@ -4,7 +4,7 @@ import SwiftUI
 struct UnifiedQueueView: View {
     enum Scope {
         case all              // due + scheduled across the fleet
-        case attention        // expired / invalid / paused
+        case state(String)    // one stuck pile: expired | invalid | paused
         case node(String)     // one node, all sections
     }
 
@@ -14,18 +14,12 @@ struct UnifiedQueueView: View {
     @State private var search = ""
 
     var body: some View {
+        let sections = self.sections
         List(selection: $selection) {
-            let (due, scheduled, attention) = sections
-            if !due.isEmpty {
-                Section("Due") { rows(due) }
+            ForEach(sections, id: \.title) { section in
+                Section(section.title) { rows(section.entries) }
             }
-            if !scheduled.isEmpty {
-                Section("Scheduled") { rows(scheduled) }
-            }
-            if !attention.isEmpty {
-                Section("Needs Attention") { rows(attention) }
-            }
-            if due.isEmpty && scheduled.isEmpty && attention.isEmpty {
+            if sections.isEmpty {
                 ContentUnavailableView(
                     "The queue is empty",
                     systemImage: "tray",
@@ -42,17 +36,21 @@ struct UnifiedQueueView: View {
         }
     }
 
-    private var sections: ([FleetEntry], [FleetEntry], [FleetEntry]) {
+    private var sections: [(title: String, entries: [FleetEntry])] {
+        let raw: [(String, [FleetEntry])]
         switch scope {
         case .all:
-            return (filter(store.dueEntries), filter(store.scheduledEntries), [])
-        case .attention:
-            return ([], [], filter(store.attentionEntries))
+            raw = [("Due", store.dueEntries), ("Scheduled", store.scheduledEntries)]
+        case .state(let state):
+            raw = [(state.capitalized, store.entries(state: state))]
         case .node(let key):
-            return (filter(store.dueEntries.filter { $0.nodeKey == key }),
-                    filter(store.scheduledEntries.filter { $0.nodeKey == key }),
-                    filter(store.attentionEntries.filter { $0.nodeKey == key }))
+            raw = ([("Due", store.dueEntries), ("Scheduled", store.scheduledEntries)]
+                   + StuckState.all.map { ($0.capitalized, store.entries(state: $0)) })
+                .map { ($0.0, $0.1.filter { $0.nodeKey == key }) }
         }
+        return raw
+            .map { (title: $0.0, entries: filter($0.1)) }
+            .filter { !$0.entries.isEmpty }
     }
 
     private func filter(_ entries: [FleetEntry]) -> [FleetEntry] {

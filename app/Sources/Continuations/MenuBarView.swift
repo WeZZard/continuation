@@ -12,9 +12,9 @@ struct MenuBarView: View {
 
     var body: some View {
         headline
-        if store.attentionCount > 0 {
-            Label("\(store.attentionCount) need attention",
-                  systemImage: "exclamationmark.triangle")
+        ForEach(store.stuckCounts, id: \.state) { pile in
+            Label("\(pile.count) \(pile.state)",
+                  systemImage: StuckState.icon(pile.state))
         }
         Divider()
         ForEach(store.nodes) { node in

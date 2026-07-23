@@ -12,9 +12,13 @@ struct SidebarView: View {
                 Label("All Continuations", systemImage: "tray.full")
                     .badge(store.dueCount)
                     .tag(SidebarSelection.all)
-                Label("Needs Attention", systemImage: "exclamationmark.triangle")
-                    .badge(store.attentionCount)
-                    .tag(SidebarSelection.attention)
+                // One row per stuck pile, present only while non-empty.
+                ForEach(store.stuckCounts, id: \.state) { pile in
+                    Label(pile.state.capitalized,
+                          systemImage: StuckState.icon(pile.state))
+                        .badge(pile.count)
+                        .tag(SidebarSelection.state(pile.state))
+                }
                 Label("Activity", systemImage: "waveform.path.ecg")
                     .tag(SidebarSelection.activity)
             }
