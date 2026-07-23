@@ -60,6 +60,31 @@ def get_status(base, path):
         return error.code
 
 
+def test_daemon_plist_rendering():
+    """The --daemon plist: system domain, invoking user pinned with HOME,
+    interpreter pinned to the installing python."""
+    import importlib.util
+    import plistlib
+    spec = importlib.util.spec_from_loader("ac_cli", loader=None)
+    module = importlib.util.module_from_spec(spec)
+    module.__file__ = BIN
+    code = open(BIN, encoding="utf-8").read()
+    exec(compile(code, BIN, "exec"), module.__dict__)
+
+    serve = plistlib.loads(module.launchd_daemon_plist(
+        module.SERVE_LABEL, ["serve"]))
+    assert serve["Label"].endswith(".serve")
+    assert serve["ProgramArguments"][0] == sys.executable
+    assert serve["ProgramArguments"][-1] == "serve"
+    assert serve["KeepAlive"] is True and serve["RunAtLoad"] is True
+    assert serve["UserName"]
+    assert serve["EnvironmentVariables"]["HOME"].startswith("/")
+
+    tick = plistlib.loads(module.launchd_daemon_plist(module.LABEL, ["tick"]))
+    assert tick["StartInterval"] == 1800
+    assert "KeepAlive" not in tick
+
+
 def test_loopback_bind_suppresses_advertisement(store):
     """Without --no-mdns, a loopback bind must still not advertise:
     dns-sd exists on this machine, so only the guard prevents a ghost

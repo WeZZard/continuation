@@ -1310,7 +1310,62 @@ def cmd_migrate(args) -> int:
     return 0
 
 
+def launchd_daemon_plist(label: str, subcommand: list) -> bytes:
+    """A LaunchDaemon plist for headless machines: system domain, runs as
+    the invoking (sudo's invoking) user with an explicit HOME so the store
+    resolves to that user, interpreter pinned to the one running this
+    install (on CLT-less machines that is a uv-managed python)."""
+    import plistlib
+    import pwd
+    user = os.environ.get("SUDO_USER") or pwd.getpwuid(os.getuid()).pw_name
+    home = pwd.getpwnam(user).pw_dir
+    payload: dict = {
+        "Label": label,
+        "ProgramArguments": [sys.executable, str(Path(__file__).resolve()),
+                             "--actor", "dispatcher", *subcommand],
+        "UserName": user,
+        "EnvironmentVariables": {"HOME": home},
+        "StandardOutPath": f"/tmp/{label}.out",
+        "StandardErrorPath": f"/tmp/{label}.err",
+    }
+    if subcommand == ["serve"]:
+        payload["RunAtLoad"] = True
+        payload["KeepAlive"] = True
+    else:
+        payload["StartInterval"] = 1800
+    return plistlib.dumps(payload)
+
+
+def _install_daemon(label: str, subcommand: list) -> int:
+    """Write + load the system-domain daemon. Deliberately touches the
+    store not at all: under sudo, any db() write would leave root-owned
+    files in (or outside) the user's store."""
+    if os.geteuid() != 0:
+        raise SystemExit(f"--daemon writes /Library/LaunchDaemons — run under sudo")
+    dest = Path("/Library/LaunchDaemons") / f"{label}.plist"
+    dest.write_bytes(launchd_daemon_plist(label, subcommand))
+    os.chown(dest, 0, 0)
+    os.chmod(dest, 0o644)
+    subprocess.run(["launchctl", "bootout", f"system/{label}"], capture_output=True)
+    subprocess.run(["launchctl", "bootstrap", "system", str(dest)], check=True)
+    print(f"bootstrapped {label} (system daemon, runs as "
+          f"{os.environ.get('SUDO_USER') or 'root'})")
+    return 0
+
+
+def _uninstall_daemon(label: str) -> int:
+    if os.geteuid() != 0:
+        raise SystemExit(f"--daemon removes /Library/LaunchDaemons — run under sudo")
+    dest = Path("/Library/LaunchDaemons") / f"{label}.plist"
+    subprocess.run(["launchctl", "bootout", f"system/{label}"], capture_output=True)
+    dest.unlink(missing_ok=True)
+    print(f"booted out and removed {label}")
+    return 0
+
+
 def cmd_install_launchd(args) -> int:
+    if args.daemon:
+        return _install_daemon(LABEL, ["tick"])
     plist_src = Path(__file__).resolve().parent.parent / "launchd" / f"{LABEL}.plist"
     dest = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
     shutil.copyfile(plist_src, dest)
@@ -1323,6 +1378,8 @@ def cmd_install_launchd(args) -> int:
 
 
 def cmd_uninstall_launchd(args) -> int:
+    if args.daemon:
+        return _uninstall_daemon(LABEL)
     dest = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
     subprocess.run(["launchctl", "unload", str(dest)], capture_output=True)
     dest.unlink(missing_ok=True)
@@ -1464,10 +1521,15 @@ class NodeAPI(BaseHTTPRequestHandler):
             "SELECT ts FROM events WHERE cmd='tick' ORDER BY id DESC LIMIT 1"
         ).fetchone()
         queue = collect_queue(conn, now_local())
+        # The tick job may live in the user domain (LaunchAgent, GUI
+        # machines) or the system domain (LaunchDaemon, headless machines);
+        # check both.
         try:
-            tick_agent_loaded = subprocess.run(
-                ["launchctl", "list", LABEL], capture_output=True,
-                timeout=10).returncode == 0
+            tick_agent_loaded = (
+                subprocess.run(["launchctl", "list", LABEL],
+                               capture_output=True, timeout=10).returncode == 0
+                or subprocess.run(["launchctl", "print", f"system/{LABEL}"],
+                                  capture_output=True, timeout=10).returncode == 0)
         except (OSError, subprocess.SubprocessError):
             tick_agent_loaded = None
         self._json({
@@ -1632,6 +1694,8 @@ def cmd_serve(args) -> int:
 
 
 def cmd_install_serve_launchd(args) -> int:
+    if args.daemon:
+        return _install_daemon(SERVE_LABEL, ["serve"])
     plist_src = Path(__file__).resolve().parent.parent / "launchd" / f"{SERVE_LABEL}.plist"
     dest = Path.home() / "Library" / "LaunchAgents" / f"{SERVE_LABEL}.plist"
     shutil.copyfile(plist_src, dest)
@@ -1644,6 +1708,8 @@ def cmd_install_serve_launchd(args) -> int:
 
 
 def cmd_uninstall_serve_launchd(args) -> int:
+    if args.daemon:
+        return _uninstall_daemon(SERVE_LABEL)
     dest = Path.home() / "Library" / "LaunchAgents" / f"{SERVE_LABEL}.plist"
     subprocess.run(["launchctl", "unload", str(dest)], capture_output=True)
     dest.unlink(missing_ok=True)
@@ -1726,15 +1792,21 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Seconds between event-table polls per SSE stream.")
     p.set_defaults(fn=cmd_serve)
 
+    daemon_help = ("System LaunchDaemon instead of a user LaunchAgent — for "
+                   "headless machines with no GUI login. Requires sudo.")
     p = sub.add_parser("install-launchd", help="Install + load the tick schedule.")
+    p.add_argument("--daemon", action="store_true", help=daemon_help)
     p.set_defaults(fn=cmd_install_launchd)
     p = sub.add_parser("uninstall-launchd", help="Unload + remove the tick schedule.")
+    p.add_argument("--daemon", action="store_true", help=daemon_help)
     p.set_defaults(fn=cmd_uninstall_launchd)
     p = sub.add_parser("install-serve-launchd",
                        help="Install + load the node API server (KeepAlive).")
+    p.add_argument("--daemon", action="store_true", help=daemon_help)
     p.set_defaults(fn=cmd_install_serve_launchd)
     p = sub.add_parser("uninstall-serve-launchd",
                        help="Unload + remove the node API server.")
+    p.add_argument("--daemon", action="store_true", help=daemon_help)
     p.set_defaults(fn=cmd_uninstall_serve_launchd)
     return parser
 
