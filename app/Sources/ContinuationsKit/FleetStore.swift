@@ -1,0 +1,287 @@
+// The aggregation point of the fleet. Each node's store.db stays the single
+// source of truth for its own queue; this object holds live *views* of the
+// N truths plus a labeled last-seen cache for offline nodes. The unified
+// list is computed, never stored.
+
+import Combine
+import Foundation
+
+public enum NodeSource: String, Codable, Sendable {
+    case bonjour
+    case manual
+}
+
+public struct NodeState: Identifiable, Hashable {
+    public let key: String
+    public var source: NodeSource
+    public var url: URL
+    public var displayName: String
+    public var info: NodeInfo?
+    public var queue: QueueSnapshot?
+    public var online: Bool = false
+    public var lastSeen: Date?
+    public var lastEventID: Int = 0
+
+    public var id: String { key }
+    public var pendingCount: Int {
+        guard let queue else { return 0 }
+        return queue.due.count + queue.scheduled.count + queue.attention.count
+    }
+}
+
+public struct FleetEntry: Identifiable, Hashable {
+    public let nodeKey: String
+    public let nodeName: String
+    public let nodeOnline: Bool
+    public let entry: QueueEntry
+
+    public var id: String { "\(nodeKey)|\(entry.id)" }
+    public var activationDate: Date? { StoreDate.parse(entry.activation) }
+}
+
+public struct ActivityItem: Identifiable, Hashable {
+    public let nodeKey: String
+    public let nodeName: String
+    public let event: EventRow
+
+    public var id: String { "\(nodeKey)#\(event.id)" }
+}
+
+@MainActor
+public final class FleetStore: ObservableObject {
+    @Published public private(set) var nodes: [NodeState] = []
+    @Published public private(set) var activity: [ActivityItem] = []
+
+    public let discovery = BonjourDiscovery()
+    private let persistence: Persistence
+    private var loops: [String: Task<Void, Never>] = [:]
+    private var cancellables: Set<AnyCancellable> = []
+
+    /// Events that change what a queue view shows; anything else is audit.
+    private static let refreshingCommands: Set<String> = [
+        "register", "unregister", "continue", "migrate", "tick",
+        "tick.start-run", "tick.evaluate", "tick.run-settled",
+    ]
+
+    public init(persistence: Persistence = Persistence()) {
+        self.persistence = persistence
+        for snapshot in persistence.loadSnapshots() {
+            guard let url = URL(string: snapshot.urlString) else { continue }
+            nodes.append(NodeState(
+                key: snapshot.key,
+                source: NodeSource(rawValue: snapshot.sourceRaw) ?? .manual,
+                url: url, displayName: snapshot.displayName,
+                info: snapshot.info, queue: snapshot.queue,
+                online: false, lastSeen: snapshot.lastSeen,
+                lastEventID: snapshot.lastEventID))
+        }
+        nodes.sort { $0.displayName < $1.displayName }
+        for node in nodes { startLoop(key: node.key) }
+        for manual in persistence.loadManualNodes() { upsertManual(manual) }
+        discovery.$services
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] services in
+                for service in services { self?.upsertBonjour(service) }
+            }
+            .store(in: &cancellables)
+        discovery.start()
+    }
+
+    // ------------------------------------------------------------- fleet ops
+
+    public func addManualNode(host: String, port: Int) {
+        let manual = ManualNode(host: host, port: port)
+        var saved = persistence.loadManualNodes()
+        if !saved.contains(manual) {
+            saved.append(manual)
+            persistence.saveManualNodes(saved)
+        }
+        upsertManual(manual)
+    }
+
+    public func removeNode(key: String) {
+        loops[key]?.cancel()
+        loops[key] = nil
+        nodes.removeAll { $0.key == key }
+        persistence.deleteSnapshot(key: key)
+        if key.hasPrefix("manual:") {
+            let remaining = persistence.loadManualNodes().filter { $0.key != key }
+            persistence.saveManualNodes(remaining)
+        }
+    }
+
+    public func node(key: String) -> NodeState? {
+        nodes.first { $0.key == key }
+    }
+
+    public func client(key: String) -> NodeClient? {
+        node(key: key).map { NodeClient(baseURL: $0.url) }
+    }
+
+    // ----------------------------------------------------------- unified view
+
+    public var dueEntries: [FleetEntry] {
+        collect(\.due).sorted {
+            ($0.activationDate ?? .distantPast) < ($1.activationDate ?? .distantPast)
+        }
+    }
+
+    public var scheduledEntries: [FleetEntry] {
+        collect(\.scheduled).sorted {
+            ($0.activationDate ?? .distantFuture) < ($1.activationDate ?? .distantFuture)
+        }
+    }
+
+    public var attentionEntries: [FleetEntry] {
+        collect(\.attention).sorted { $0.entry.registeredAt < $1.entry.registeredAt }
+    }
+
+    public var attentionCount: Int { attentionEntries.count }
+    public var dueCount: Int { dueEntries.count }
+
+    /// What the menu bar counts down to: the soonest scheduled activation,
+    /// or nil when something is already due (the countdown shows "due now").
+    public var nextScheduled: FleetEntry? { scheduledEntries.first }
+
+    private func collect(_ section: KeyPath<QueueSnapshot, [QueueEntry]>) -> [FleetEntry] {
+        nodes.flatMap { node -> [FleetEntry] in
+            guard let queue = node.queue else { return [] }
+            return queue[keyPath: section].map {
+                FleetEntry(nodeKey: node.key, nodeName: node.displayName,
+                           nodeOnline: node.online, entry: $0)
+            }
+        }
+    }
+
+    // ------------------------------------------------------------- node loops
+
+    private func upsertManual(_ manual: ManualNode) {
+        guard let url = manual.url else { return }
+        upsert(key: manual.key, source: .manual, url: url,
+               fallbackName: manual.host)
+    }
+
+    private func upsertBonjour(_ service: DiscoveredService) {
+        upsert(key: "bonjour:\(service.name)", source: .bonjour,
+               url: service.url, fallbackName: service.name)
+    }
+
+    private func upsert(key: String, source: NodeSource, url: URL,
+                        fallbackName: String) {
+        if let index = nodes.firstIndex(where: { $0.key == key }) {
+            if nodes[index].url != url {
+                nodes[index].url = url
+                restartLoop(key: key)
+            }
+            return
+        }
+        nodes.append(NodeState(key: key, source: source, url: url,
+                               displayName: fallbackName))
+        nodes.sort { $0.displayName < $1.displayName }
+        startLoop(key: key)
+    }
+
+    private func restartLoop(key: String) {
+        loops[key]?.cancel()
+        loops[key] = nil
+        startLoop(key: key)
+    }
+
+    private func startLoop(key: String) {
+        guard loops[key] == nil else { return }
+        loops[key] = Task { [weak self] in
+            while let self, !Task.isCancelled {
+                await self.runLoopOnce(key: key)
+                try? await Task.sleep(for: .seconds(5))
+            }
+        }
+    }
+
+    private func runLoopOnce(key: String) async {
+        guard let state = node(key: key) else { return }
+        let client = NodeClient(baseURL: state.url)
+        do {
+            let info = try await client.node()
+            let queue = try await client.queue()
+            update(key: key) { node in
+                node.online = true
+                node.lastSeen = Date()
+                node.info = info
+                node.queue = queue
+                node.displayName = info.hostname
+            }
+            dedupe(nodeID: info.nodeID, keep: key)
+            saveSnapshot(key: key)
+            var cursor = node(key: key)?.lastEventID ?? 0
+            if cursor == 0 {
+                // First contact: seed activity with recent history instead
+                // of replaying the store's whole audit log.
+                let recent = try await client.log(limit: 50)
+                cursor = recent.first?.id ?? 0
+                ingest(recent.reversed(), key: key)
+            }
+            for try await event in client.events(after: cursor) {
+                update(key: key) { node in
+                    node.lastEventID = event.id
+                    node.lastSeen = Date()
+                }
+                ingest([event], key: key)
+                if Self.refreshingCommands.contains(event.cmd) {
+                    let queue = try await client.queue()
+                    let info = try? await client.node()
+                    update(key: key) { node in
+                        node.queue = queue
+                        if let info { node.info = info }
+                    }
+                    saveSnapshot(key: key)
+                }
+            }
+        } catch {
+            update(key: key) { node in node.online = false }
+            saveSnapshot(key: key)
+        }
+    }
+
+    private func dedupe(nodeID: String, keep key: String) {
+        // The same node can surface twice (Bonjour + manual, or an old
+        // Bonjour name). Keep manual entries over Bonjour ones; otherwise
+        // keep the current loop's entry.
+        let duplicates = nodes.filter {
+            $0.key != key && $0.info?.nodeID == nodeID
+        }
+        guard let mine = node(key: key) else { return }
+        for duplicate in duplicates {
+            if duplicate.source == .manual && mine.source == .bonjour {
+                removeNode(key: key)
+                return
+            }
+            removeNode(key: duplicate.key)
+        }
+    }
+
+    private func update(key: String, _ mutate: (inout NodeState) -> Void) {
+        guard let index = nodes.firstIndex(where: { $0.key == key }) else { return }
+        mutate(&nodes[index])
+    }
+
+    private func ingest(_ events: [EventRow], key: String) {
+        guard let state = node(key: key) else { return }
+        let items = events.map {
+            ActivityItem(nodeKey: key, nodeName: state.displayName, event: $0)
+        }
+        activity.insert(contentsOf: items.reversed(), at: 0)
+        if activity.count > 500 {
+            activity.removeLast(activity.count - 500)
+        }
+    }
+
+    private func saveSnapshot(key: String) {
+        guard let state = node(key: key) else { return }
+        persistence.saveSnapshot(NodeSnapshot(
+            key: state.key, sourceRaw: state.source.rawValue,
+            urlString: state.url.absoluteString,
+            displayName: state.displayName, info: state.info,
+            queue: state.queue, lastSeen: state.lastSeen,
+            lastEventID: state.lastEventID))
+    }
+}
