@@ -15,8 +15,13 @@ swift build -c release --product Continuations
 
 APP=dist/Continuations.app
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/Continuations "$APP/Contents/MacOS/Continuations"
+
+ICONSET=.build/AppIcon.iconset
+rm -rf "$ICONSET"
+swift scripts/make-icon.swift "$ICONSET" > /dev/null
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -37,6 +42,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <string>0.1.0</string>
     <key>CFBundleVersion</key>
     <string>1</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>
@@ -51,5 +58,21 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-codesign --force --sign - "$APP"
+# Prefer the Developer ID identity (hardened runtime + timestamp) for a
+# distributable archive; fall back to ad-hoc for local dev machines.
+# Sign by certificate hash: duplicate certs make names ambiguous.
+IDENTITY="${CODESIGN_IDENTITY:-$(security find-identity -v -p codesigning \
+    | awk '/Developer ID Application/ {print $2; exit}')}"
+if [[ -n "$IDENTITY" ]]; then
+    codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
+    echo "signed: $IDENTITY"
+else
+    codesign --force --sign - "$APP"
+    echo "signed: ad-hoc (no Developer ID identity found)"
+fi
+
+VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" \
+    "$APP/Contents/Info.plist")
+ditto -c -k --keepParent "$APP" "dist/Continuations-$VERSION.zip"
 echo "built $APP"
+echo "archived dist/Continuations-$VERSION.zip"
