@@ -51,6 +51,7 @@ $BIN register my-task --agent claude-code --single-run \
   --must-not "push to any git remote" \
   --continuation continuation.json
 
+$BIN authoring               # the core-authoring guide (the grammar's single home)
 $BIN queue                   # THE queue: due / scheduled / needs attention
 $BIN list
 $BIN tick --dry-run          # what would run now
@@ -144,3 +145,36 @@ legacy top-`<CONTINUATION>` documents remain parseable.
 
 `claude-code` (`claude -p --output-format json --permission-mode auto
 --plugin-dir plugins/claude-code`) and `pi` (`pi -p --mode json`).
+
+## Interactive dispatch — the `continuation` plugin
+
+Interactive Claude Code and pi sessions hand new lines of work to this
+scheduler through the `continuation:schedule` skill
+(`plugins/continuation`): preflight the runtime, fetch the current grammar
+with `agentic-continuation authoring` (the skill deliberately carries no
+copy of it), draft the core, get the user's explicit approval, then
+register through the CLI with `--actor interactive-agent`. The CLI stays
+the single writer and `serve` stays read-only — dispatch is a local CLI
+invocation, never an HTTP write. Sessions spawned BY the dispatcher
+(`AGENTIC_TASK_ID` in the environment) never use the skill; they return
+`<CONTINUATION>` blocks exactly as their document instructs.
+
+The repo root doubles as a Claude Code plugin marketplace
+(`.claude-plugin/marketplace.json`):
+
+```bash
+claude plugin marketplace add ~/Artifacts/Repositories/com.github/WeZZard/agentic-continuation
+claude plugin install continuation@agentic-continuation
+```
+
+The same directory is also a pi package (`package.json` carries the `pi`
+manifest pointing at the same skill — one SKILL.md, two manifests):
+
+```bash
+pi install ~/Artifacts/Repositories/com.github/WeZZard/agentic-continuation/plugins/continuation
+```
+
+Claude Code caches the installed plugin by version: after editing the
+skill, bump `plugins/continuation/.claude-plugin/plugin.json` and run
+`claude plugin update continuation@agentic-continuation`. pi references
+local packages in place, so it tracks the repo live.

@@ -12,7 +12,10 @@ it carries the current state, pending work, and the settled design rulings.
   moving between tables. Multi-item transitions are single ACID transactions.
 - Not a DAG: evaluation returns zero/one/a tuple of continuations; cycles
   are legal. The term is "continuation" — never "seed".
-- The CLI is the single writer; agents only RETURN `<CONTINUATION>` blocks.
+- The CLI is the single writer. Dispatcher-spawned agents only RETURN
+  `<CONTINUATION>` blocks; interactive sessions dispatch new tasks only
+  through `register` via the `continuation:schedule` skill after explicit
+  user approval — never through `continue`/`tick`, never via HTTP.
 - Zero dependencies: `/usr/bin/python3` stdlib + launchd. Keep it that way.
 - Discuss design with the user before implementing; build only after an
   explicit go. Present design options in prose, not option-forms.

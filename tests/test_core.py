@@ -151,3 +151,39 @@ def test_next_activation_states():
     state, _ = ac.next_activation(
         {"mode": "at", "datetime": "2026-07-23 09:00"}, datetime(2026, 7, 22, 8, 0), now)
     assert state == "due"
+
+
+def test_grammar_has_one_home():
+    """CORE_SHAPE and CORE_GRAMMAR are the grammar's single home: rendered
+    verbatim into both the continuation documents and the authoring guide."""
+    assert ac.CORE_SHAPE in ac.CONTINUATION_SECTION
+    assert ac.CORE_GRAMMAR in ac.CONTINUATION_SECTION
+    assert ac.CORE_SHAPE in ac.AUTHORING
+    assert ac.CORE_GRAMMAR in ac.AUTHORING
+
+
+def test_schedule_skill_carries_no_grammar_copy():
+    """The continuation:schedule skill defers to `authoring`; a grammar copy
+    in the skill would be a second truth that drifts on an edition bump."""
+    skill = (Path(__file__).resolve().parent.parent
+             / "plugins" / "continuation" / "skills" / "schedule"
+             / "SKILL.md").read_text()
+    assert "authoring" in skill
+    assert "AGENTIC_TASK_ID" in skill          # spawned-session guard
+    assert "--actor interactive-agent" in skill
+    assert '"schema_version"' not in skill     # no core shape copy
+    assert '"mode"' not in skill               # no schedule grammar copy
+
+
+def test_plugin_manifests_agree():
+    """One directory, two manifests: the Claude Code plugin.json and the pi
+    package.json must point at the same skill and carry the same version."""
+    plugin_root = (Path(__file__).resolve().parent.parent
+                   / "plugins" / "continuation")
+    claude = json.loads((plugin_root / ".claude-plugin" / "plugin.json").read_text())
+    pi = json.loads((plugin_root / "package.json").read_text())
+    assert claude["name"] == pi["name"] == "continuation"
+    assert claude["version"] == pi["version"]
+    skill_dirs = [plugin_root / entry for entry in pi["pi"]["skills"]]
+    assert skill_dirs == [plugin_root / "skills" / "schedule"]
+    assert all((d / "SKILL.md").exists() for d in skill_dirs)

@@ -69,7 +69,7 @@ END_KEYS = {"schema_version", "step"}
 KEBAB = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 LABEL = "com.wezzard.agent.agentic-continuation"
 SERVE_LABEL = LABEL + ".serve"
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 PROTO = "v1"
 DEFAULT_SERVE_PORT = 7787
 MDNS_SERVICE = "_agentic-cont._tcp"  # DNS-SD service names are capped at 15 bytes
@@ -109,16 +109,11 @@ Returning nothing keeps this task scheduled per its own schedule (that is
 how it waits for the world).
 """
 
-CONTINUATION_SECTION = """## Continuation
+# The grammar has exactly one home: CORE_SHAPE and CORE_GRAMMAR are rendered
+# both into every continuation document (CONTINUATION_SECTION) and by the
+# `authoring` subcommand. An edition bump edits them here and nowhere else.
 
-Evaluating this task returns zero, one, or several continuations. Register
-each by including, in your FINAL message, one <CONTINUATION> block per
-continuation, shaped exactly like this. Keep these keys exactly, replace
-placeholder values with observed values, and do not add keys — the tool
-extracts, validates, and registers them; you never write state files:
-
-<CONTINUATION>
-{
+CORE_SHAPE = """{
   "schema_version": 2,
   "step": "...",
   "task": "...",
@@ -126,10 +121,9 @@ extracts, validates, and registers them; you never write state files:
   "when_to_continue": "...",
   "context": "...",
   "schedule": { "mode": "..." }
-}
-</CONTINUATION>
+}"""
 
-`schema_version` must be exactly 2. `when_to_continue` may be "" when the
+CORE_GRAMMAR = """`schema_version` must be exactly 2. `when_to_continue` may be "" when the
 returned task has no continuation to continue. `schedule` must be exactly
 one of the schema_version-2 forms:
 
@@ -138,14 +132,28 @@ one of the schema_version-2 forms:
   long has passed since the last evaluation
 - `{ "mode": "daily", "at": "HH:MM" }` — due once per day after that local time
 - `{ "mode": "at", "datetime": "YYYY-MM-DD HH:MM" }` — due once, after that
-  local datetime
+  local datetime"""
+
+CONTINUATION_SECTION = f"""## Continuation
+
+Evaluating this task returns zero, one, or several continuations. Register
+each by including, in your FINAL message, one <CONTINUATION> block per
+continuation, shaped exactly like this. Keep these keys exactly, replace
+placeholder values with observed values, and do not add keys — the tool
+extracts, validates, and registers them; you never write state files:
+
+<CONTINUATION>
+{CORE_SHAPE}
+</CONTINUATION>
+
+{CORE_GRAMMAR}
 
 Returning nothing keeps THIS continuation scheduled: it will be evaluated
 again per its own schedule (that is how a step waits for the world). To end
 this line of work with no successor, return exactly this terminal block:
 
 <CONTINUATION>
-{ "schema_version": 2, "step": "end" }
+{{ "schema_version": 2, "step": "end" }}
 </CONTINUATION>
 
 Choose each returned schedule to match what that step actually waits for.
@@ -177,6 +185,41 @@ conditions, pointers — not keystroke scripts.
 - You **MUST NOT** return a continuation after a failed or partial step.
 - You **MUST NOT** start work outside this task, however useful it seems;
   note it in your final message instead.
+"""
+
+AUTHORING = f"""# Authoring a continuation core (schema_version {SCHEMA_VERSION})
+
+A task is registered from a continuation core: one JSON object — no
+<CONTINUATION> wrapper — with exactly these keys, placeholder values
+replaced with real ones and no keys added:
+
+{CORE_SHAPE}
+
+{CORE_GRAMMAR}
+
+Field guidance: `step` is the kebab-case name of this step. `task` says what
+to do, at goal altitude — goals, verifiable stop conditions, pointers, not
+keystroke scripts. `when_to_stop` lists verifiable stop conditions.
+`context` carries everything the step needs (paths, ids, measured facts): a
+continuation is a value, and anything an evaluation needs must be in its
+`task` or `context` or reachable from paths recorded there. Every step must
+tolerate running twice. `when_to_continue` says when an evaluation should
+return successor continuations; "" means the task has no continuation to
+continue and its rendered document offers only the terminal end block.
+Choose the schedule to match what the step actually waits for.
+
+Register the core through the CLI — it is the single writer; never write
+store files yourself:
+
+  agentic-continuation --actor <who> register <task-id> \\
+      --agent claude-code|pi --continuation core.json \\
+      [--single-run] [--must-not "rule"]...
+
+`--continuation -` reads the core from stdin. The task id is kebab-case.
+Each `--must-not` records a task-scoped MUST NOT rule (written without the
+prefix) rendered into every document of that task. Repetitive tasks (the
+default) start a fresh run from this core whenever the previous run
+settles; `--single-run` tasks disable themselves once their run settles.
 """
 
 BLOCK_RE = re.compile(r"<CONTINUATION>\s*(.*?)\s*</CONTINUATION>", re.DOTALL)
@@ -912,6 +955,16 @@ def cmd_show(args) -> int:
     event(conn, "show", args.actor, task_id=args.task_id,
           run_id=args.run or None,
           continuation_id=args.continuation or "task-continuation")
+    return 0
+
+
+def cmd_authoring(args) -> int:
+    """Print the current edition's core-authoring guide (the program
+    constants — the grammar's single home; plugins must never carry a
+    copy of it)."""
+    sys.stdout.write(AUTHORING)
+    conn = db()
+    event(conn, "authoring", args.actor)
     return 0
 
 
@@ -1722,8 +1775,13 @@ def cmd_uninstall_serve_launchd(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agentic-continuation", description=__doc__)
     parser.add_argument("--actor", default="human",
-                        help="Who is invoking (human | agent-plugin | dispatcher).")
+                        help="Who is invoking (human | agent-plugin |"
+                             " interactive-agent | dispatcher).")
     sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("authoring",
+                       help="Print the current edition's core-authoring guide.")
+    p.set_defaults(fn=cmd_authoring)
 
     p = sub.add_parser("register", help="Register a task with its continuation.")
     p.add_argument("task_id")

@@ -61,6 +61,23 @@ def test_register_continuation_from_stdin(cli, store):
     assert '"step": "probe-step"' in cli("show", "stdin-task").stdout
 
 
+def test_authoring_prints_grammar_and_logs(cli, store):
+    out = cli("--actor", "interactive-agent", "authoring").stdout
+    assert '"schema_version": 2,' in out
+    assert '`{ "mode": "now" }`' in out
+    assert "no\n<CONTINUATION> wrapper" in out
+    assert "--continuation" in out
+    entries = read_log(store)
+    assert entries[-1]["cmd"] == "authoring"
+    assert entries[-1]["actor"] == "interactive-agent"
+
+
+def test_authoring_needs_no_existing_state(cli, store):
+    """The guide must print on a machine whose store has never been touched."""
+    assert not (store / "store.db").exists()
+    cli("authoring")
+
+
 def test_register_duplicate_refused_force_replaces(cli, continuation_file):
     cli("register", "dup-task", "--agent", "claude-code", "--continuation", continuation_file())
     proc = cli("register", "dup-task", "--agent", "claude-code",

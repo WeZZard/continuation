@@ -1,0 +1,5 @@
+{
+  "name": "continuation",
+  "version": "0.1.0",
+  "description": "Schedule continuations with the agentic-continuation scheduler on this machine: the continuation:schedule skill fetches the current core grammar from the CLI (`authoring`), drafts a continuation core with the user's approval, and registers it through the CLI — the single writer."
+}
