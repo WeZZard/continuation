@@ -105,6 +105,31 @@ with the user first — explicitly not implemented yet.
   in its context) — not an automated tick. Automated ticks since
   install have correctly evaluated nothing.
 
+## Addendum (2026-07-24): app shipped, fleet staged
+
+- App polish landed: user-facing machine names (`display_name` via
+  scutil), native NSMenu menu bar extra, expired/invalid/paused as three
+  named piles (no "Needs Attention" umbrella), loopback binds don't
+  advertise over Bonjour. Suite: 68 passing.
+- **Shipped**: `/Applications/Continuations.app` — Developer ID signed
+  (team 3R2L6323L4), hardened runtime, vector icon (user's pick over
+  five AI-generated candidates; `bundle.sh` also accepts an external
+  `AppIcon-master.png`). Archive: `app/dist/Continuations-0.1.0.zip`.
+  Not notarized — distribution is direct copy, no quarantine.
+- **Minis staged**: repo rsynced to both Mac minis at the mirrored path;
+  CLI verified there under uv-managed CPython 3.12 (no CLT on minis —
+  /usr/bin/python3 is a stub). `--daemon` install mode added: system
+  LaunchDaemons running as the sudo-invoking user, interpreter pinned to
+  sys.executable, store untouched under sudo.
+- **STILL PENDING (user, launchd policy)**: serve LaunchAgent on this
+  Mac (`install-serve-launchd` — a session-scoped serve process covers
+  it meanwhile), and on each mini
+  `sudo "$(uv python find)" .../agentic-continuation install-launchd
+  --daemon && ... install-serve-launchd --daemon`.
+- Cross-repo: dispatch plugin v0.2.0 released (native-save image briefs,
+  per-agent invocation examples) and cataloged in the wezzard-skills
+  marketplace at 1.0.27.
+
 ## Next phase pointers
 
 - Phase 2 (verbs): add `pause`/`resume` to the CLI first (likely a
