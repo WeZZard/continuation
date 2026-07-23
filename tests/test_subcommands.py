@@ -1,12 +1,34 @@
 """Subcommand integration tests: happy paths, corner cases, negative cases.
 
 Every test drives the real CLI as a subprocess against a temp store; tick
-tests run the full spawn loop through the fake agent binary.
+tests run the full spawn loop through the fake agent binary. State is
+asserted through the CLI's own read surface (queue/list/show/log) — the
+queue table is the single source of truth and tests treat it as opaque,
+except the lease tests, which reach into store.db the way a concurrent
+dispatcher would.
 """
 
 import json
+import sqlite3
+from datetime import datetime, timedelta, timezone
 
 from conftest import continuation_block, make_continuation_core, read_log
+
+
+def queue_entry(cli, cid):
+    """The queue entry for `cid`, from the CLI's own JSON read surface."""
+    queue = json.loads(cli("queue", "--json").stdout)
+    return next((e for e in queue["due"] + queue["scheduled"] + queue["attention"]
+                 if e["continuation"] == cid), None)
+
+
+def set_lease(store, expires_at_iso):
+    """Simulate another dispatcher holding the run lease."""
+    conn = sqlite3.connect(store / "store.db")
+    conn.execute("UPDATE runs SET leased_by='other-dispatcher', lease_expires_at=?",
+                 (expires_at_iso,))
+    conn.commit()
+    conn.close()
 
 
 # ------------------------------------------------------------------ register
@@ -15,20 +37,20 @@ def test_register_happy_renders_continuation_and_logs(cli, store, continuation_f
     out = cli("register", "my-task", "--agent", "claude-code",
               "--continuation", continuation_file()).stdout
     assert "registered my-task" in out
-    doc = (store / "tasks" / "my-task" / "continuation.md").read_text()
-    assert '"step": "probe-step"' in doc
-    assert "You **MUST NOT** write or edit any file" in doc
     entries = read_log(store)
     assert entries[-1]["cmd"] == "register"
     assert entries[-1]["task_id"] == "my-task"
     assert entries[-1]["outcome"] == "ok"
+    doc = cli("show", "my-task").stdout
+    assert '"step": "probe-step"' in doc
+    assert "You **MUST NOT** write or edit any file" in doc
 
 
 def test_register_task_rules_rendered(cli, store, continuation_file):
     cli("register", "ruled-task", "--agent", "pi",
         "--must-not", "touch the fits", "--must-not", "push to any git remote",
         "--continuation", continuation_file())
-    doc = (store / "tasks" / "ruled-task" / "continuation.md").read_text()
+    doc = cli("show", "ruled-task").stdout
     assert "You **MUST NOT** touch the fits" in doc
     assert "You **MUST NOT** push to any git remote" in doc
 
@@ -36,7 +58,7 @@ def test_register_task_rules_rendered(cli, store, continuation_file):
 def test_register_continuation_from_stdin(cli, store):
     cli("register", "stdin-task", "--agent", "claude-code", "--continuation", "-",
         stdin=json.dumps(make_continuation_core()))
-    assert (store / "tasks" / "stdin-task" / "continuation.md").exists()
+    assert '"step": "probe-step"' in cli("show", "stdin-task").stdout
 
 
 def test_register_duplicate_refused_force_replaces(cli, continuation_file):
@@ -59,7 +81,7 @@ def test_register_invalid_continuation_refused(cli, continuation_file, store):
                "--continuation", continuation_file(schedule={"mode": "cron", "expr": "*"}),
                expect=1)
     assert "invalid continuation" in proc.stderr
-    assert not (store / "tasks" / "bad-continuation").exists()
+    assert "bad-continuation" not in cli("list").stdout
 
 
 def test_register_terminal_continuation_refused(cli, tmp_path):
@@ -80,9 +102,9 @@ def test_register_future_schema_refused(cli, continuation_file):
 
 def test_unregister_happy_retains_data(cli, store, registered):
     cli("unregister", registered)
-    assert registered not in json.loads(
-        (store / "registry.json").read_text())["tasks"]
-    assert (store / "tasks" / registered / "continuation.md").exists()
+    assert registered not in cli("list").stdout
+    # Data retained: the task continuation still renders from the store.
+    assert '"step": "probe-step"' in cli("show", registered).stdout
 
 
 def test_unregister_unknown_task(cli):
@@ -101,14 +123,6 @@ def test_list_shows_pending_due_state(cli, store, registered):
     out = cli("list").stdout
     assert "it-task" in out and "single-run" in out
     assert "probe-step--01: pending" in out and "DUE" in out
-
-
-def test_list_reports_unparseable_document(cli, store, registered):
-    cli("tick", "--dry-run")
-    run = next((store / "tasks" / registered / "runs").iterdir())
-    doc = next((run / "continuations").glob("*.md"))
-    doc.write_text("garbage, not a rendered document")
-    assert "INVALID" in cli("list").stdout
 
 
 # ---------------------------------------------------------------------- show
@@ -159,10 +173,10 @@ def test_continue_zero_return_keeps_pending_and_counts_streak(cli, store, regist
     for expected in (1, 2):
         cli("continue", registered, "--run", run, "--from", "probe-step--01",
             stdin="Still waiting on the world.")
-        state = json.loads((store / "tasks" / registered / "runs" / run /
-                            "continuations" / "probe-step--01.state.json").read_text())
-        assert state["status"] == "pending"
-        assert state["zero_return_streak"] == expected
+        entry = queue_entry(cli, "probe-step--01")
+        assert entry["status"] == "pending"
+        assert entry["zero_return_streak"] == expected
+        assert entry["last_summary"] == "Still waiting on the world."
 
 
 def test_continue_terminal_ends_line(cli, store, registered):
@@ -170,9 +184,11 @@ def test_continue_terminal_ends_line(cli, store, registered):
     run = next((store / "tasks" / registered / "runs").iterdir()).name
     cli("continue", registered, "--run", run, "--from", "probe-step--01",
         stdin='Done.\n<CONTINUATION>{"schema_version": 1, "step": "end"}</CONTINUATION>')
-    state = json.loads((store / "tasks" / registered / "runs" / run /
-                        "continuations" / "probe-step--01.state.json").read_text())
-    assert state["status"] == "ended"
+    entry = read_log(store)[-1]
+    assert entry["cmd"] == "continue" and entry["ended_line"] is True
+    # Ended entries leave the queue; the run has settled.
+    assert queue_entry(cli, "probe-step--01") is None
+    assert "no active run (1 settled run(s))" in cli("list").stdout
 
 
 def test_continue_mixed_valid_invalid_blocks(cli, store, registered):
@@ -247,8 +263,7 @@ def test_tick_single_run_settles_and_disables(cli, store, registered, tmp_path):
     response = tmp_path / "response.txt"
     response.write_text('Over.\n<CONTINUATION>{"schema_version": 1, "step": "end"}</CONTINUATION>')
     cli("tick", env={"FAKE_AGENT_RESPONSE": str(response)})
-    registry = json.loads((store / "registry.json").read_text())
-    assert registry["tasks"][registered]["enabled"] is False
+    assert "DISABLED" in cli("list").stdout
     assert any(e["cmd"] == "tick.run-settled" for e in read_log(store))
     assert "would evaluate" not in cli("tick", "--dry-run").stdout
 
@@ -275,24 +290,13 @@ def test_tick_missing_agent_binary_logged_stays_pending(cli, store, continuation
     assert "pending" in cli("list").stdout
 
 
-def test_tick_quarantines_tampered_document(cli, store, registered):
+def test_tick_respects_live_run_lease(cli, store, registered, tmp_path):
     cli("tick", "--dry-run")
-    run = next((store / "tasks" / registered / "runs").iterdir())
-    doc = next((run / "continuations").glob("*.md"))
-    doc.write_text("tampered — not a rendered document")
-    cli("tick")
-    state = json.loads(next((run / "continuations").glob("*.state.json")).read_text())
-    assert state["status"] == "invalid"
-    assert any(e.get("outcome") == "invalid-continuation" for e in read_log(store))
-
-
-def test_tick_respects_run_lock(cli, store, registered, tmp_path):
-    cli("tick", "--dry-run")
-    run = next((store / "tasks" / registered / "runs").iterdir())
-    (run / ".run-lock").write_text("held")
+    future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    set_lease(store, future)
     capture = tmp_path / "capture.json"
     cli("tick", env={"FAKE_AGENT_CAPTURE": str(capture)})
-    assert not capture.exists()
+    assert not capture.exists()  # another dispatcher holds the run
 
 
 # ----------------------------------------------------------------- log/verify
@@ -322,31 +326,17 @@ def test_verify_reports_missing_and_present_paths(cli, store, registered,
     assert "MISS" in proc.stdout
 
 
-def test_tick_breaks_stale_run_lock(cli, store, registered, tmp_path):
-    import os as _os
-    import time as _time
+def test_tick_breaks_stale_run_lease(cli, store, registered, tmp_path):
     cli("tick", "--dry-run")
-    run = next((store / "tasks" / registered / "runs").iterdir())
-    lock = run / ".run-lock"
-    lock.write_text("stale holder")
-    old = _time.time() - 3 * 3600
-    _os.utime(lock, (old, old))
+    past = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+    set_lease(store, past)
     response = tmp_path / "response.txt"
     response.write_text("Checked; still waiting.")
     capture = tmp_path / "capture.json"
     cli("tick", env={"FAKE_AGENT_RESPONSE": str(response),
                      "FAKE_AGENT_CAPTURE": str(capture)})
-    assert capture.exists()  # stale lock broken, evaluation proceeded
-    assert any(e["cmd"] == "tick.break-stale-lock" for e in read_log(store))
-
-
-def test_tick_fresh_run_lock_still_respected(cli, store, registered, tmp_path):
-    cli("tick", "--dry-run")
-    run = next((store / "tasks" / registered / "runs").iterdir())
-    (run / ".run-lock").write_text("live holder")
-    capture = tmp_path / "capture.json"
-    cli("tick", env={"FAKE_AGENT_CAPTURE": str(capture)})
-    assert not capture.exists()
+    assert capture.exists()  # stale lease broken, evaluation proceeded
+    assert any(e["cmd"] == "tick.break-stale-lease" for e in read_log(store))
 
 
 # --------------------------------------------------------------------- queue

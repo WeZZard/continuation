@@ -19,17 +19,27 @@ returning functions — and this tool is the trampoline that consumes them.
 - The agent **returns** continuations as `<CONTINUATION>` JSON blocks in its
   final message. The Claude Code Stop-hook plugin (or the dispatcher's
   post-exit fallback, which also covers `pi`) hands that message to
-  `continue`, the CLI validates against the versioned schema, renders, and
-  registers. **The CLI is the single writer**, and every subcommand
-  invocation appends to `log.jsonl` with injected task/run/continuation ids.
+  `continue`, the CLI validates against the versioned schema and registers.
+  **The CLI is the single writer**, and every subcommand invocation is
+  recorded in the `events` table with injected task/run/continuation ids.
+- **THE QUEUE is the single source of truth**: one SQLite table. An entry
+  lives there forever; completing it is a status transition
+  (`pending → consumed | ended | expired | invalid`), never a row moving
+  between tables. Activation times are materialized at write time, so
+  due-selection and ordering are reads of a column. Consuming an entry and
+  inserting its returned children is one ACID transaction — mixed states
+  are unrepresentable.
 - Returning nothing keeps a continuation scheduled (that is how a step waits
-  for the world); the terminal block `{"schema_version": 1, "step": "end"}`
-  ends a line of work; a run is **settled** when no pending continuations
-  remain. Single-run tasks disable themselves when settled; repetitive tasks
-  start a fresh run from the task continuation on the next tick.
-- **Observability**: `list` (state + due-ness), `log` (the audit trail,
-  filterable), `show` (documents), `verify` (claimed artifact paths exist),
-  Things 3 todos on run-complete / failure / possibly-stuck.
+  for the world); the terminal block `{"schema_version": 2, "step": "end"}`
+  ends a line of work; a run is **settled** when every entry is consumed or
+  ended (`expired` / `invalid` entries hold it open for a human). Single-run
+  tasks disable themselves when settled; repetitive tasks start a fresh run
+  from the task continuation on the next tick.
+- **Observability**: `queue` (THE queue: due / scheduled / needs-attention,
+  in activation order, `--json` for machines), `list` (per-task runs and
+  entry states), `log` (the audit trail, filterable), `show` (documents,
+  rendered on demand), `verify` (claimed artifact paths exist), Things 3
+  todos on run-complete / failure / possibly-stuck.
 
 ## Quick start
 
@@ -41,6 +51,7 @@ $BIN register my-task --agent claude-code --single-run \
   --must-not "push to any git remote" \
   --continuation continuation.json
 
+$BIN queue                   # THE queue: due / scheduled / needs attention
 $BIN list
 $BIN tick --dry-run          # what would run now
 $BIN tick                    # evaluate due continuations once
@@ -51,11 +62,20 @@ $BIN log --task my-task      # the audit trail
 ## Store
 
 `~/.local/share/agentic-continuation/` (override:
-`AGENTIC_CONTINUATION_STORE`): `registry.json`, `log.jsonl`,
-`tasks/<id>/continuation.md` (the task continuation), `tasks/<id>/runs/<run>/` (the agent's
-workspace) with `continuations/<cid>.md` + `.state.json`. Agent transcripts
-stay in each agent's own home; the log stores session references, not
-copies.
+`AGENTIC_CONTINUATION_STORE`):
+
+- `store.db` — THE store (SQLite, WAL): the `queue` table (single source of
+  truth), plus `tasks` (registry), `runs` (workspaces + evaluation leases),
+  and `events` (audit trail; its autoincrement id is a live-update cursor).
+- `log.jsonl` — derived mirror of `events` for grep and git. Export, never
+  truth.
+- `tasks/<id>/runs/<run>/` — the run workspace: agent cwd plus an archived
+  copy of every prompt actually sent (`prompt--<cid>--<n>.md`). Documents
+  are otherwise not state — `show` renders them on demand from the queue.
+
+Agent transcripts stay in each agent's own home; events store session
+references, not copies. A pre-SQLite file store is imported once with
+`$BIN migrate`; every other subcommand refuses loudly until that has run.
 
 ## Sandbox policy
 

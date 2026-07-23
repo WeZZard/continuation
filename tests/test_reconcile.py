@@ -3,9 +3,8 @@ live tick. Simulates the courier sequence at the CLI level: a hook that read
 a stale transcript registers zero returns; the dispatcher's captured final
 message carries the real blocks and must still land them."""
 
-import json
-
 from conftest import continuation_block, read_log
+from test_subcommands import queue_entry
 
 
 def test_stale_hook_then_authoritative_text_still_registers(cli, store, registered):
@@ -14,16 +13,14 @@ def test_stale_hook_then_authoritative_text_still_registers(cli, store, register
     # Hook fires against a stale transcript: only the opening message exists.
     cli("--actor", "agent-plugin", "continue", registered, "--run", run,
         "--from", "probe-step--01", stdin="I'm checking whether the thing finished.")
-    state_path = (store / "tasks" / registered / "runs" / run /
-                  "continuations" / "probe-step--01.state.json")
-    state = json.loads(state_path.read_text())
-    assert state["status"] == "pending" and state["evaluations"] == 1
+    entry = queue_entry(cli, "probe-step--01")
+    assert entry["status"] == "pending" and entry["evaluations"] == 1
     # Dispatcher reconcile: authoritative final text carries the block.
     cli("--actor", "dispatcher-fallback", "continue", registered, "--run", run,
         "--from", "probe-step--01",
         stdin="It finished; handing off.\n" + continuation_block(step="handoff-step"))
-    state = json.loads(state_path.read_text())
-    assert state["status"] == "consumed"
+    assert queue_entry(cli, "probe-step--01") is None  # consumed: out of the queue
+    assert "probe-step--01: consumed" in cli("list").stdout
     entries = [e for e in read_log(store) if e["cmd"] == "continue"]
     assert [e["actor"] for e in entries] == ["agent-plugin", "dispatcher-fallback"]
     assert entries[-1]["returned"] == ["handoff-step--01"]
