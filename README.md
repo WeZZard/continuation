@@ -57,7 +57,47 @@ $BIN tick --dry-run          # what would run now
 $BIN tick                    # evaluate due continuations once
 $BIN install-launchd         # tick every 30 min from launchd
 $BIN log --task my-task      # the audit trail
+
+$BIN serve                   # node API: read-only HTTP + SSE on :7787
+$BIN install-serve-launchd   # keep the node API running from launchd
 ```
+
+## Node API (protocol v1)
+
+`serve` exposes this store to fleet clients — the macOS app first, peer
+nodes later. Versioned under `/v1/`, JSON over HTTP, plus an SSE tail:
+
+| Endpoint | Returns |
+|---|---|
+| `GET /v1/node` | Identity + health: node id (a ULID minted once into `meta`), hostname, version, accepted schema editions, last tick, tick-agent state, queue counts |
+| `GET /v1/queue` | The queue exactly as `queue --json` reports it |
+| `GET /v1/tasks`, `/v1/tasks/<id>` | Registry; task detail carries runs and their entries |
+| `GET /v1/tasks/<id>/runs/<run>/prompts[/<name>]` | Archived prompts of each spawn |
+| `GET /v1/log?task=&run=&after=&limit=` | Event rows (`after` pages forward by `events.id`) |
+| `GET /v1/events?after=<id>` | SSE stream of new events; `Last-Event-ID` resumes |
+
+Request handling opens the database **read-only** — writes stay the CLI's
+alone. Authentication is an exposure-layer concern by design: LAN trust
+today, an authenticating edge (e.g. Cloudflare Access) when public; the
+protocol itself carries none. On Macs the server advertises itself over
+Bonjour as `_agentic-cont._tcp` via the system `dns-sd`.
+
+## macOS app
+
+`app/` — "Continuations", a SwiftUI fleet manager over the node protocol
+(SwiftPM; `ContinuationsKit` holds the models, HTTP+SSE client, Bonjour
+discovery, and fleet store, ready for the iOS port). It aggregates every
+node's queue into one unified list; each node's `store.db` stays the only
+truth, offline nodes show their last-seen snapshot labeled "as of".
+
+```bash
+cd app
+swift test                  # end-to-end against a real `serve` on a temp store
+scripts/bundle.sh           # builds dist/Continuations.app
+```
+
+Building needs a full Xcode (`DEVELOPER_DIR` is auto-detected by the
+bundle script); plain CommandLineTools cannot drive swift-build.
 
 ## Store
 
