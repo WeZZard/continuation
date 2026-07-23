@@ -28,6 +28,11 @@ struct SidebarView: View {
                         HealthDot(online: node.online)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(node.displayName)
+                            if node.isLocal {
+                                Text("This Mac")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
                             if !node.online, let seen = node.lastSeen {
                                 Text("as of \(seen.formatted(date: .omitted, time: .shortened))")
                                     .font(.caption2)

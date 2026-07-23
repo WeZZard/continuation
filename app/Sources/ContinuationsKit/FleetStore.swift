@@ -27,6 +27,12 @@ public struct NodeState: Identifiable, Hashable {
         guard let queue else { return 0 }
         return queue.due.count + queue.scheduled.count + queue.attention.count
     }
+
+    /// Reached over loopback — only this machine can be. Pinned first in
+    /// the fleet and labeled "This Mac".
+    public var isLocal: Bool {
+        ["127.0.0.1", "localhost", "::1"].contains(url.host ?? "")
+    }
 }
 
 public struct FleetEntry: Identifiable, Hashable {
@@ -75,7 +81,7 @@ public final class FleetStore: ObservableObject {
                 online: false, lastSeen: snapshot.lastSeen,
                 lastEventID: snapshot.lastEventID))
         }
-        nodes.sort { $0.displayName < $1.displayName }
+        sortNodes()
         for node in nodes { startLoop(key: node.key) }
         for manual in persistence.loadManualNodes() { upsertManual(manual) }
         discovery.$services
@@ -188,8 +194,15 @@ public final class FleetStore: ObservableObject {
         }
         nodes.append(NodeState(key: key, source: source, url: url,
                                displayName: fallbackName))
-        nodes.sort { $0.displayName < $1.displayName }
+        sortNodes()
         startLoop(key: key)
+    }
+
+    private func sortNodes() {
+        nodes.sort {
+            if $0.isLocal != $1.isLocal { return $0.isLocal }
+            return $0.displayName < $1.displayName
+        }
     }
 
     private func restartLoop(key: String) {
@@ -221,6 +234,7 @@ public final class FleetStore: ObservableObject {
                 node.queue = queue
                 node.displayName = info.displayName ?? info.hostname
             }
+            sortNodes()
             dedupe(nodeID: info.nodeID, keep: key)
             saveSnapshot(key: key)
             var cursor = node(key: key)?.lastEventID ?? 0
