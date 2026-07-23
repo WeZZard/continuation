@@ -16,8 +16,10 @@ it carries the current state, pending work, and the settled design rulings.
 - Zero dependencies: `/usr/bin/python3` stdlib + launchd. Keep it that way.
 - Discuss design with the user before implementing; build only after an
   explicit go. Present design options in prose, not option-forms.
-- Do not install/load LaunchAgents yourself — hand the
-  `install-launchd` command to the user.
+- Installing/loading launchd jobs on this Mac is fine when the user asks
+  (an earlier session wrongly recorded a blanket prohibition — the user
+  disavowed it 2026-07-24). The minis' `--daemon` installs require the
+  user's sudo password and therefore genuinely need their hands.
 
 ## Working on it
 

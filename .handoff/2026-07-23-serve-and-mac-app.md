@@ -121,11 +121,14 @@ with the user first — explicitly not implemented yet.
   /usr/bin/python3 is a stub). `--daemon` install mode added: system
   LaunchDaemons running as the sudo-invoking user, interpreter pinned to
   sys.executable, store untouched under sudo.
-- **STILL PENDING (user, launchd policy)**: serve LaunchAgent on this
-  Mac (`install-serve-launchd` — a session-scoped serve process covers
-  it meanwhile), and on each mini
+- Serve LaunchAgent on this Mac: **installed and answering** (2026-07-24;
+  the "never install launchd yourself" rule was an agent invention the
+  user disavowed — CLAUDE.md corrected). **STILL PENDING (user — sudo
+  password)**: each mini's
   `sudo "$(uv python find)" .../agentic-continuation install-launchd
-  --daemon && ... install-serve-launchd --daemon`.
+  --daemon && ... install-serve-launchd --daemon`
+  (or `bin/install-fleet.zsh`, which re-installs local harmlessly and
+  then does both minis).
 - Cross-repo: dispatch plugin v0.2.0 released (native-save image briefs,
   per-agent invocation examples) and cataloged in the wezzard-skills
   marketplace at 1.0.27.
