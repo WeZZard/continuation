@@ -18,9 +18,30 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/Continuations "$APP/Contents/MacOS/Continuations"
 
+# Icon: a chosen 1024×1024 master at AppIcon-master.png wins; otherwise
+# the vector generator draws the placeholder.
 ICONSET=.build/AppIcon.iconset
 rm -rf "$ICONSET"
-swift scripts/make-icon.swift "$ICONSET" > /dev/null
+if [[ -f AppIcon-master.png ]]; then
+    mkdir -p "$ICONSET"
+    while read -r px name; do
+        sips -z "$px" "$px" AppIcon-master.png \
+            --out "$ICONSET/$name.png" > /dev/null
+    done <<'SIZES'
+16 icon_16x16
+32 icon_16x16@2x
+32 icon_32x32
+64 icon_32x32@2x
+128 icon_128x128
+256 icon_128x128@2x
+256 icon_256x256
+512 icon_256x256@2x
+512 icon_512x512
+1024 icon_512x512@2x
+SIZES
+else
+    swift scripts/make-icon.swift "$ICONSET" > /dev/null
+fi
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
