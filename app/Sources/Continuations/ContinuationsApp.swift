@@ -18,7 +18,7 @@ struct ContinuationsApp: App {
         } label: {
             Image(systemName: "point.3.connected.trianglepath.dotted")
         }
-        .menuBarExtraStyle(.window)
+        .menuBarExtraStyle(.menu)
 
         Settings {
             SettingsView()
