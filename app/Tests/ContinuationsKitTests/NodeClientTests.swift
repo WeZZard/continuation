@@ -20,6 +20,7 @@ final class NodeClientTests: XCTestCase {
         XCTAssertEqual(node.nodeID.count, 26)
         XCTAssertEqual(node.schemaVersions, [1, 2])
         XCTAssertFalse(node.hostname.isEmpty)
+        XCTAssertFalse((node.displayName ?? "").isEmpty)
     }
 
     func testQueueAndTaskDetail() async throws {

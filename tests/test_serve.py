@@ -70,6 +70,7 @@ def test_node_identity_and_health(server):
     assert node["schema_versions"] == [1, 2]
     assert node["version"]
     assert node["hostname"]
+    assert node["display_name"]  # scutil ComputerName, hostname fallback
     assert node["queue_counts"] == {"due": 0, "scheduled": 0, "attention": 0}
     assert node["last_tick_at"] is None  # no tick has run in this store
 

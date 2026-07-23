@@ -208,7 +208,7 @@ public final class FleetStore: ObservableObject {
                 node.lastSeen = Date()
                 node.info = info
                 node.queue = queue
-                node.displayName = info.hostname
+                node.displayName = info.displayName ?? info.hostname
             }
             dedupe(nodeID: info.nodeID, keep: key)
             saveSnapshot(key: key)

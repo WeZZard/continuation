@@ -54,6 +54,7 @@ public struct NodeInfo: Codable, Hashable, Sendable {
     public let proto: String
     public let nodeID: String
     public let hostname: String
+    public let displayName: String?
     public let version: String
     public let schemaVersions: [Int]
     public let now: String
@@ -71,7 +72,9 @@ public struct NodeInfo: Codable, Hashable, Sendable {
     enum CodingKeys: String, CodingKey {
         case proto
         case nodeID = "node_id"
-        case hostname, version
+        case hostname
+        case displayName = "display_name"
+        case version
         case schemaVersions = "schema_versions"
         case now
         case startedAt = "started_at"

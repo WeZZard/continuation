@@ -1337,6 +1337,22 @@ RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
 PROMPT_NAME_RE = re.compile(r"^prompt--[A-Za-z0-9][A-Za-z0-9._-]*\.md$")
 
 
+def node_display_name() -> str:
+    """The user-facing machine name ("Mac mini"), not the bare hostname
+    ("mac"). scutil is macOS-only and lives outside minimal PATHs, so it
+    is invoked by absolute path with the hostname as fallback."""
+    scutil = "/usr/sbin/scutil"
+    if os.path.exists(scutil):
+        try:
+            proc = subprocess.run([scutil, "--get", "ComputerName"],
+                                  capture_output=True, text=True, timeout=10)
+            if proc.returncode == 0 and proc.stdout.strip():
+                return proc.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return socket.gethostname()
+
+
 def event_row_payload(row: sqlite3.Row) -> dict:
     return {
         "id": row["id"], "ts": row["ts"], "cmd": row["cmd"],
@@ -1447,7 +1463,8 @@ class NodeAPI(BaseHTTPRequestHandler):
             tick_agent_loaded = None
         self._json({
             "proto": PROTO, "node_id": self.server.node_id,
-            "hostname": socket.gethostname(), "version": VERSION,
+            "hostname": socket.gethostname(),
+            "display_name": self.server.display_name, "version": VERSION,
             "schema_versions": sorted(SUPPORTED_SCHEMAS),
             "now": now_utc().isoformat(),
             "started_at": self.server.started_at,
@@ -1562,9 +1579,11 @@ class NodeServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address, node_id: str, sse_poll: float):
+    def __init__(self, address, node_id: str, sse_poll: float,
+                 display_name: str):
         self.node_id = node_id
         self.sse_poll = sse_poll
+        self.display_name = display_name
         self.started_at = now_utc().isoformat()
         super().__init__(address, NodeAPI)
 
@@ -1574,12 +1593,14 @@ def cmd_serve(args) -> int:
     node_id = ensure_node_id(conn)
     event(conn, "serve", args.actor, port=args.port, bind=args.bind)
     conn.close()  # serving holds no writable connection
-    httpd = NodeServer((args.bind, args.port), node_id, args.sse_poll)
+    display_name = node_display_name()
+    httpd = NodeServer((args.bind, args.port), node_id, args.sse_poll,
+                       display_name)
     port = httpd.server_address[1]
     mdns = None
     if not args.no_mdns and shutil.which("dns-sd"):
         mdns = subprocess.Popen(
-            ["dns-sd", "-R", socket.gethostname().split(".")[0], MDNS_SERVICE,
+            ["dns-sd", "-R", display_name, MDNS_SERVICE,
              ".", str(port), f"nodeid={node_id}", f"proto={PROTO}"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
