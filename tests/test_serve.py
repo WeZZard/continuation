@@ -60,6 +60,22 @@ def get_status(base, path):
         return error.code
 
 
+def test_loopback_bind_suppresses_advertisement(store):
+    """Without --no-mdns, a loopback bind must still not advertise:
+    dns-sd exists on this machine, so only the guard prevents a ghost
+    node from appearing in every browser on the network."""
+    proc = subprocess.Popen(
+        [sys.executable, BIN, "serve", "--bind", "127.0.0.1", "--port", "0",
+         "--sse-poll", "0.05"],
+        env={**os.environ, "AGENTIC_CONTINUATION_STORE": str(store),
+             "PATH": "/usr/bin:/bin"},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    line = proc.stdout.readline()
+    proc.terminate()
+    proc.wait(timeout=10)
+    assert "not advertised: loopback bind" in line
+
+
 # ------------------------------------------------------------------ /v1/node
 
 def test_node_identity_and_health(server):

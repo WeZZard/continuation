@@ -1606,14 +1606,19 @@ def cmd_serve(args) -> int:
     httpd = NodeServer((args.bind, args.port), node_id, args.sse_poll,
                        display_name)
     port = httpd.server_address[1]
+    # Advertise only what you can deliver: a loopback bind is unreachable
+    # from other machines, and advertising it would plant a ghost node in
+    # every browser on the network.
+    loopback = args.bind.startswith("127.") or args.bind in ("::1", "localhost")
     mdns = None
-    if not args.no_mdns and shutil.which("dns-sd"):
+    if not args.no_mdns and not loopback and shutil.which("dns-sd"):
         mdns = subprocess.Popen(
             ["dns-sd", "-R", display_name, MDNS_SERVICE,
              ".", str(port), f"nodeid={node_id}", f"proto={PROTO}"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    print(f"serving node {node_id} on {args.bind}:{port} (proto {PROTO})",
+    note = ", not advertised: loopback bind" if loopback else ""
+    print(f"serving node {node_id} on {args.bind}:{port} (proto {PROTO}{note})",
           flush=True)
     try:
         httpd.serve_forever()
