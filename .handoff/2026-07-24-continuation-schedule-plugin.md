@@ -179,6 +179,18 @@ with the user first).
   The banner also has an untested `.updateAvailable` path for the same
   reason.
 
+## Addendum: /Applications refreshed (same day, night)
+
+- The user hit stale Settings in the SHIPPED app — /Applications still
+  carried the pre-rename, pre-Settings build (old id
+  com.wezzard.continuations, no payload). Rebuilt release and replaced
+  it: /Applications/Continuations.app is now com.wezzarddesign.…,
+  payload embedded, tabbed Settings verified live (screenshot:
+  /tmp/release-settings-agents.png — dev-wiring banner, no debug
+  footer, actions correctly withheld because this Mac is dev-wired).
+  UserDefaults identity reset with the bundle-id change (trivial;
+  manual-nodes.json is folder-keyed and survived — nodes intact).
+
 ## Not done / open
 
 - **Not published to the wezzard-skills marketplace** — that catalog pins
