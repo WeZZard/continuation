@@ -96,7 +96,10 @@ truth, offline nodes show their last-seen snapshot labeled "as of".
 ```bash
 cd app
 swift test                  # end-to-end against a real `serve` on a temp store
-scripts/bundle.sh           # builds dist/Continuations.app
+scripts/bundle.sh           # builds dist/Continuations.app (release)
+scripts/run-debug.sh        # THE debug loop: rebuild + relaunch
+                            # dist/Continuation-Debug.app, log at
+                            # /tmp/continuation-debug.log
 ```
 
 Building needs a full Xcode (`DEVELOPER_DIR` is auto-detected by the

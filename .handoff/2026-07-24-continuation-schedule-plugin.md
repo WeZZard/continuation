@@ -142,6 +142,16 @@ with the user first).
   implied by the naming convergence but changes app identity (prefs,
   App Support), so it rides the first app-phase release deliberately.
 
+## Addendum: debug-loop principle (same day)
+
+- New hard rule in CLAUDE.md (user's ruling): debugging the app ALWAYS
+  uses the debug build via `app/scripts/run-debug.sh` — rebuild,
+  pkill -x Continuation-Debug (unique executable name, cannot hit the
+  release app), relaunch detached, log to /tmp/continuation-debug.log.
+  Verified: launch + replace-on-rerun both work. Settings-window
+  wireframes were presented and await the user's approval; build not
+  started.
+
 ## Not done / open
 
 - **Not published to the wezzard-skills marketplace** — that catalog pins
