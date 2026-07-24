@@ -114,9 +114,11 @@ with the user first).
   buttons — no CLI installer engine (user overruled that suggestion; the
   wiring logic should live in a small shared Swift module so a future
   App Store helper can reuse it). One release tag will version app + CLI
-  + plugin together; the app bundles the toolchain payload and
-  materializes it to a stable Application Support path; agents are wired
-  once by pointer registration. pi picks up content changes live;
+  + plugin together; the app bundles its payload — the `continuation`
+  command-line tool plus the agent plugin, nothing else; the user
+  rejected the term "toolchain", never use it in UI — and materializes
+  it to a stable Application Support path (`.../Continuation/` holding
+  `bin/` + `plugins/`); agents are wired once by pointer registration. pi picks up content changes live;
   Claude Code's cache is VERSION-KEYED, so updates flow only when the
   materialized plugin version bumps (the app should nudge
   `claude plugin update` after materializing). Debug/release split at
