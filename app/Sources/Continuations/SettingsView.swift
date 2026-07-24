@@ -7,7 +7,7 @@ struct SettingsView: View {
             NodesSettingsView()
                 .tabItem { Label("Nodes", systemImage: "point.3.connected.trianglepath.dotted") }
             AgentsSettingsView()
-                .tabItem { Label("Agents", systemImage: "command") }
+                .tabItem { Label("Agents", systemImage: "puzzlepiece.extension") }
         }
         .frame(width: 560)
     }
@@ -95,7 +95,16 @@ final class InstallerModel: ObservableObject {
         let engine = self.engine
         Task.detached(priority: .userInitiated) { [weak self] in
             let snap = engine.snapshot()
-            await MainActor.run { self?.snapshot = snap }
+            await self?.apply(snapshot: snap)
+        }
+    }
+
+    private func apply(snapshot snap: InstallerSnapshot,
+                       failure: String? = nil, endBusy: Bool = false) {
+        snapshot = snap
+        if endBusy {
+            lastError = failure
+            busy = false
         }
     }
 
@@ -108,18 +117,14 @@ final class InstallerModel: ObservableObject {
         lastError = nil
         let engine = self.engine
         Task.detached(priority: .userInitiated) { [weak self] in
-            var failure: String?
+            let failure: String?
             do {
-                if try !work(engine) { failure = "\(label) failed — see the log." }
+                failure = try work(engine) ? nil : "\(label) failed — see the log."
             } catch {
                 failure = error.localizedDescription
             }
             let snap = engine.snapshot()
-            await MainActor.run {
-                self?.snapshot = snap
-                self?.lastError = failure
-                self?.busy = false
-            }
+            await self?.apply(snapshot: snap, failure: failure, endBusy: true)
         }
     }
 
@@ -295,6 +300,7 @@ struct AgentsSettingsView: View {
     @ViewBuilder private var agentSections: some View {
         Section("Agent Plugins") {
             agentRow(
+                logo: .claude,
                 title: "Claude Code",
                 status: model.snapshot?.claude,
                 wiringLine: { wiring in
@@ -309,6 +315,7 @@ struct AgentsSettingsView: View {
                 uninstall: model.uninstallClaude,
                 footnote: "New sessions pick up changes after restart.")
             agentRow(
+                logo: .pi,
                 title: "pi",
                 status: model.snapshot?.pi,
                 wiringLine: { wiring in
@@ -333,13 +340,14 @@ struct AgentsSettingsView: View {
     }
 
     @ViewBuilder
-    private func agentRow(title: String, status: AgentStatus?,
+    private func agentRow(logo: AgentLogo, title: String, status: AgentStatus?,
                           wiringLine: (PluginWiring) -> String,
                           install: @escaping () -> Void,
                           uninstall: @escaping () -> Void,
                           footnote: String?) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
+            HStack(spacing: 8) {
+                AgentLogoView(logo: logo)
                 Text(title)
                 if let version = status?.binaryVersion {
                     Text(version).font(.caption).foregroundStyle(.secondary)
@@ -429,6 +437,46 @@ struct AgentsSettingsView: View {
         }
         .padding(16)
         .frame(width: 520, height: 360)
+    }
+}
+
+/// Each agent is identified by its own mark: Claude Code by the Claude
+/// spark (the vendor's published icon, used nominatively to identify the
+/// product), pi by the π glyph — which IS its mark: pi's own app title is
+/// the bare glyph.
+enum AgentLogo {
+    case claude
+    case pi
+}
+
+struct AgentLogoView: View {
+    let logo: AgentLogo
+
+    var body: some View {
+        switch logo {
+        case .claude:
+            if let url = Bundle.module.url(forResource: "claude-logo", withExtension: "png"),
+               let image = NSImage(contentsOf: url) {
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 22, height: 22)
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+            } else {
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(Color(red: 0.80, green: 0.42, blue: 0.30))
+                    .frame(width: 22, height: 22)
+                    .overlay(Text("✳︎").font(.system(size: 12)).foregroundStyle(.white))
+            }
+        case .pi:
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(Color(white: 0.13))
+                .frame(width: 22, height: 22)
+                .overlay(
+                    Text("π")
+                        .font(.system(size: 14, weight: .semibold, design: .serif))
+                        .foregroundStyle(.white))
+        }
     }
 }
 

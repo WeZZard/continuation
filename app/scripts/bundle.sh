@@ -38,6 +38,10 @@ swift build -c "$CONFIG" --product Continuations
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp ".build/$CONFIG/Continuations" "$APP/Contents/MacOS/$EXEC_NAME"
+# SwiftPM target resources (agent logos …) — Bundle.module resolves this
+# bundle from Contents/Resources and traps if it is missing.
+ditto ".build/$CONFIG/Continuations_Continuations.bundle" \
+    "$APP/Contents/Resources/Continuations_Continuations.bundle"
 
 # Icon: a chosen 1024×1024 master at AppIcon-master.png wins; otherwise
 # the vector generator draws the placeholder.

@@ -15,6 +15,7 @@ let package = Package(
         .executableTarget(
             name: "Continuations",
             dependencies: ["ContinuationsKit"],
+            resources: [.process("Resources")],
             swiftSettings: [.swiftLanguageMode(.v5)]),
         .testTarget(
             name: "ContinuationsKitTests",
