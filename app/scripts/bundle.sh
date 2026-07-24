@@ -3,7 +3,7 @@
 # Release (default): dist/Continuations.app
 # Debug (--debug):   dist/Continuation-Debug.app — display name
 #                    "Continuation Debug", bundle id
-#                    com.wezzard.continuation.debug — so debug and release
+#                    com.wezzarddesign.continuation.debug — so debug and release
 #                    install side by side with separate prefs and state.
 # The bundle (not the bare binary) is what carries the local-network and
 # Bonjour privacy declarations macOS requires for NWBrowser.
@@ -18,12 +18,12 @@ fi
 if [[ "$CONFIG" == "debug" ]]; then
     APP=dist/Continuation-Debug.app
     APP_NAME="Continuation Debug"
-    BUNDLE_ID="com.wezzard.continuation.debug"
+    BUNDLE_ID="com.wezzarddesign.continuation.debug"
     EXEC_NAME="Continuation-Debug"
 else
     APP=dist/Continuations.app
     APP_NAME="Continuations"
-    BUNDLE_ID="com.wezzard.continuations"
+    BUNDLE_ID="com.wezzarddesign.continuations"
     EXEC_NAME="Continuations"
 fi
 

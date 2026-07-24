@@ -128,14 +128,16 @@ with the user first).
 
 - User ruling implemented: `app/scripts/bundle.sh --debug` builds
   `dist/Continuation-Debug.app` — display name **"Continuation Debug"**,
-  bundle id `com.wezzard.continuation.debug`, executable
+  bundle id `com.wezzarddesign.continuation.debug`, executable
   `Continuation-Debug` (distinct in Activity Monitor). Verified built +
   Developer ID signed alongside the release bundle; release output is
   unchanged (`dist/Continuations.app`, byte-identical plist fields) and
   still the only archived artifact.
 - The debug bundle id uses the FORWARD name (`continuation`, singular)
   since nothing debug is shipped; the release app is still
-  "Continuations"/`com.wezzard.continuations` because that identity is
+  "Continuations"/`com.wezzarddesign.continuations` (prefix changed from
+  `com.wezzard` per user ruling; the launchd `com.wezzard.agent.*` labels
+  are the machine convention and were NOT touched) because that identity is
   installed in /Applications — renaming release to "Continuation" is
   implied by the naming convergence but changes app identity (prefs,
   App Support), so it rides the first app-phase release deliberately.
