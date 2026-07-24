@@ -154,6 +154,31 @@ with the user first).
   wireframes were presented and await the user's approval; build not
   started.
 
+## Addendum: Settings window BUILT (same day, evening)
+
+- **Agents pane shipped** per the approved wireframes. Settings is now
+  tabbed (Nodes = the old form, moved to `SettingsView.swift`; Agents =
+  new). `ContinuationsKit/Installer.swift` is the single wiring home:
+  pure classifiers (`InstallerFacts` — CLI version regex, plugin.json
+  version, claude/pi wiring classification incl. dev-checkout detection)
+  + `InstallerEngine` (materialize-to-App-Support with staging swap,
+  PATH link, shell-outs to `claude plugin`/`pi` with PATH-augmented zsh).
+  Payload embedded by bundle.sh at Resources/payload (bin/continuation,
+  .claude-plugin/marketplace.json, plugins/continuation) for BOTH
+  configs. Payload dest: ~/Library/Application Support/Continuation/
+  (singular — distinct from the FleetStore's "Continuations" dir).
+- Verified: 12 Swift tests green (8 new classifier tests); debug app
+  driven via cua-driver — Agents pane screenshot shows the TRUE state of
+  this Mac: dev-wiring banner, both agents badged to the checkout with
+  actions withheld, bundled 0.3.0 from payload, PATH link detected,
+  debug-build footer. Screenshot: /tmp/settings-agents.png.
+- NOT yet exercised for real: the mutating paths (materialize + wire /
+  update / uninstall) — this Mac is dev-wired so the engine correctly
+  refuses to touch it, and the debug build disables actions anyway.
+  First real exercise = a release-build run on a clean HOME (or a mini).
+  The banner also has an untested `.updateAvailable` path for the same
+  reason.
+
 ## Not done / open
 
 - **Not published to the wezzard-skills marketplace** — that catalog pins

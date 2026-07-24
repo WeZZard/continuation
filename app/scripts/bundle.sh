@@ -65,6 +65,15 @@ else
 fi
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 
+# Payload: the `continuation` CLI + the agent plugin (plus the marketplace
+# manifest that names the plugin), embedded for the Settings installer.
+# The materialized copy in Application Support is what agents get wired to.
+PAYLOAD="$APP/Contents/Resources/payload"
+mkdir -p "$PAYLOAD/bin" "$PAYLOAD/.claude-plugin"
+cp ../bin/continuation "$PAYLOAD/bin/continuation"
+cp ../.claude-plugin/marketplace.json "$PAYLOAD/.claude-plugin/marketplace.json"
+ditto ../plugins/continuation "$PAYLOAD/plugins/continuation"
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

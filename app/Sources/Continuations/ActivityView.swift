@@ -56,31 +56,3 @@ struct AddNodeSheet: View {
     }
 }
 
-struct SettingsView: View {
-    @EnvironmentObject private var store: FleetStore
-
-    var body: some View {
-        Form {
-            Section("Known Nodes") {
-                ForEach(store.nodes) { node in
-                    HStack {
-                        HealthDot(online: node.online)
-                        VStack(alignment: .leading) {
-                            Text(node.displayName)
-                            Text("\(node.source.rawValue) · \(node.url.absoluteString)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button("Remove") { store.removeNode(key: node.key) }
-                    }
-                }
-                if store.nodes.isEmpty {
-                    Text("No nodes known yet.").foregroundStyle(.secondary)
-                }
-            }
-        }
-        .formStyle(.grouped)
-        .frame(width: 460, height: 320)
-    }
-}
