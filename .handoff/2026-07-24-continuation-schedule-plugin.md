@@ -124,6 +124,22 @@ with the user first).
   never fork the skill name — dev skill text goes to project scope, dev
   CLI/store via CONTINUATION_BIN / AGENTIC_CONTINUATION_STORE.
 
+## Addendum: debug app identity (same day, later still)
+
+- User ruling implemented: `app/scripts/bundle.sh --debug` builds
+  `dist/Continuation-Debug.app` — display name **"Continuation Debug"**,
+  bundle id `com.wezzard.continuation.debug`, executable
+  `Continuation-Debug` (distinct in Activity Monitor). Verified built +
+  Developer ID signed alongside the release bundle; release output is
+  unchanged (`dist/Continuations.app`, byte-identical plist fields) and
+  still the only archived artifact.
+- The debug bundle id uses the FORWARD name (`continuation`, singular)
+  since nothing debug is shipped; the release app is still
+  "Continuations"/`com.wezzard.continuations` because that identity is
+  installed in /Applications — renaming release to "Continuation" is
+  implied by the naming convergence but changes app identity (prefs,
+  App Support), so it rides the first app-phase release deliberately.
+
 ## Not done / open
 
 - **Not published to the wezzard-skills marketplace** — that catalog pins
