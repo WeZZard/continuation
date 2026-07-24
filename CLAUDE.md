@@ -1,4 +1,4 @@
-# agentic-continuation
+# continuation (agentic-continuation)
 
 A continuation-passing scheduler for agent tasks. Read `README.md` for the
 model; read the newest document in `.handoff/` **before doing anything** —
@@ -29,7 +29,9 @@ it carries the current state, pending work, and the settled design rulings.
 - Tests: `uv run --no-project --with pytest pytest tests/ -q`
 - Live store: `~/.local/share/agentic-continuation/` (override with
   `AGENTIC_CONTINUATION_STORE`; tests use temp stores automatically).
-- Inspect: `bin/agentic-continuation queue | list | log | show`.
+- Inspect: `bin/continuation queue | list | log | show` (the CLI was
+  renamed 2026-07-24; `bin/agentic-continuation` remains a compat symlink
+  because installed launchd plists reference it).
 - The registered task `jlens-mobile-lens-ab` is real and load-bearing; its
   MUST NOTs (never touch the fitting jobs on the Mac minis, never push to
   git remotes) are recorded in the registry — honor them in any manual test.

@@ -1,0 +1,1893 @@
+#!/usr/bin/env python3
+"""agentic-continuation — a continuation-passing scheduler for agent tasks.
+
+Concept: evaluating a task's continuation returns zero, one, or a tuple of
+continuations — like a function returning functions. The tool is the
+trampoline: launchd ticks it coarsely; each continuation's own `schedule`
+decides when it is due; a headless agent evaluates it; whatever the agent
+RETURNS (in <CONTINUATION> blocks in its final message) is validated and
+registered by this CLI — the single writer. Every subcommand invocation is
+recorded in the events log.
+
+Storage: THE QUEUE is the single source of truth — one SQLite table
+(stdlib sqlite3, WAL). A queue entry lives there forever; completing it is
+a status transition (pending → consumed | ended | expired | invalid), never
+a row moving between tables. Activation times are materialized at write
+time, so ordering and due-selection are reads of a column, not a
+computation. Consuming an entry and inserting its children is one ACID
+transaction: the mixed states that plagued the file store are
+unrepresentable.
+
+Documents are not state: they are rendered on demand from the queue row's
+core (a pure function), and each spawn archives the exact prompt into the
+run workspace as a flight recorder. The filesystem keeps what filesystems
+are for: run workspaces and artifacts. log.jsonl is a derived mirror of
+the events table, for grep and git — never truth.
+
+Store (override with AGENTIC_CONTINUATION_STORE):
+  ~/.local/share/agentic-continuation/
+    store.db                          THE store: queue, tasks, runs, events
+    log.jsonl                         derived mirror of events (export, not truth)
+    tasks/<task-id>/runs/<run-id>/    run workspace (agent cwd, prompt archive)
+
+A pre-SQLite file store is imported once via `migrate`; every other
+subcommand refuses loudly until that has run.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import secrets
+import shutil
+import signal
+import socket
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.parse
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+SCHEMA_VERSION = 2
+# Edition 2: when_to_continue may be the empty string — a task with no
+# continuation to continue; its rendered document omits the return
+# vocabulary except the terminal end block. Edition 1 (non-empty required)
+# remains accepted; a v1 core is a valid v2 core.
+SUPPORTED_SCHEMAS = {1, 2}
+CORE_KEYS = {
+    "schema_version", "step", "task", "when_to_stop",
+    "when_to_continue", "context", "schedule",
+}
+END_KEYS = {"schema_version", "step"}
+KEBAB = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+LABEL = "com.wezzard.agent.agentic-continuation"
+SERVE_LABEL = LABEL + ".serve"
+VERSION = "0.3.0"
+PROTO = "v1"
+DEFAULT_SERVE_PORT = 7787
+MDNS_SERVICE = "_agentic-cont._tcp"  # DNS-SD service names are capped at 15 bytes
+
+STORE = Path(
+    os.environ.get("AGENTIC_CONTINUATION_STORE", "~/.local/share/agentic-continuation")
+).expanduser()
+
+RUN_LEASE_MAX_AGE_SECONDS = 2 * 3600  # 2x the default agent timeout
+
+# --------------------------------------------------------------------------
+# Program constants of the continuation document. Everything here is
+# byte-identical in every rendered document; agents influence only the
+# values rendered into the marked slots.
+# --------------------------------------------------------------------------
+
+HEADER = (
+    "<!-- rendered by agentic-continuation; do not edit — returned continuations\n"
+    "     replace this file's successors, they do not modify it -->\n"
+)
+
+INSTRUCTION = """You are evaluating a registered continuation. Perform the task below now:
+honor every stop condition, and state plainly in your final message what you
+did or why you stopped.
+"""
+
+COMPLETION_SECTION = """## Completion
+
+This task has no continuation to continue. When its work is complete, end
+this line by returning exactly this terminal block in your FINAL message:
+
+<CONTINUATION>
+{ "schema_version": 2, "step": "end" }
+</CONTINUATION>
+
+Returning nothing keeps this task scheduled per its own schedule (that is
+how it waits for the world).
+"""
+
+# The grammar has exactly one home: CORE_SHAPE and CORE_GRAMMAR are rendered
+# both into every continuation document (CONTINUATION_SECTION) and by the
+# `authoring` subcommand. An edition bump edits them here and nowhere else.
+
+CORE_SHAPE = """{
+  "schema_version": 2,
+  "step": "...",
+  "task": "...",
+  "when_to_stop": ["..."],
+  "when_to_continue": "...",
+  "context": "...",
+  "schedule": { "mode": "..." }
+}"""
+
+CORE_GRAMMAR = """`schema_version` must be exactly 2. `when_to_continue` may be "" when the
+returned task has no continuation to continue. `schedule` must be exactly
+one of the schema_version-2 forms:
+
+- `{ "mode": "now" }` — due on the next dispatcher tick
+- `{ "mode": "every", "amount": N, "unit": "m" | "h" | "d" }` — due when that
+  long has passed since the last evaluation
+- `{ "mode": "daily", "at": "HH:MM" }` — due once per day after that local time
+- `{ "mode": "at", "datetime": "YYYY-MM-DD HH:MM" }` — due once, after that
+  local datetime"""
+
+CONTINUATION_SECTION = f"""## Continuation
+
+Evaluating this task returns zero, one, or several continuations. Register
+each by including, in your FINAL message, one <CONTINUATION> block per
+continuation, shaped exactly like this. Keep these keys exactly, replace
+placeholder values with observed values, and do not add keys — the tool
+extracts, validates, and registers them; you never write state files:
+
+<CONTINUATION>
+{CORE_SHAPE}
+</CONTINUATION>
+
+{CORE_GRAMMAR}
+
+Returning nothing keeps THIS continuation scheduled: it will be evaluated
+again per its own schedule (that is how a step waits for the world). To end
+this line of work with no successor, return exactly this terminal block:
+
+<CONTINUATION>
+{{ "schema_version": 2, "step": "end" }}
+</CONTINUATION>
+
+Choose each returned schedule to match what that step actually waits for.
+"""
+
+PRINCIPLES = """**Continuation Design Principles:**
+
+A continuation is a value, not a file you edit: evaluating a task returns
+zero, one, or a tuple of continuations, and the tool consumes what you
+return. Anything the next step needs must be in its `task` or `context` or
+reachable from paths recorded there. Every step tolerates running twice.
+Author returned steps at this document's altitude: goals, verifiable stop
+conditions, pointers — not keystroke scripts.
+
+**MUST:**
+
+- You **MUST** verify this task's preconditions before acting on anything.
+- You **MUST** put returned <CONTINUATION> blocks in your final message only,
+  each a complete JSON object with exactly the keys and schema shown above.
+- You **MUST** record produced artifact paths and measured results in each
+  returned continuation's `context`.
+- You **MUST** state plainly in your final message what you did or why you
+  stopped, before any <CONTINUATION> blocks.
+
+**MUST NOT:**
+
+- You **MUST NOT** write or edit any file under the agentic-continuation
+  store yourself.
+- You **MUST NOT** return a continuation after a failed or partial step.
+- You **MUST NOT** start work outside this task, however useful it seems;
+  note it in your final message instead.
+"""
+
+AUTHORING = f"""# Authoring a continuation core (schema_version {SCHEMA_VERSION})
+
+A task is registered from a continuation core: one JSON object — no
+<CONTINUATION> wrapper — with exactly these keys, placeholder values
+replaced with real ones and no keys added:
+
+{CORE_SHAPE}
+
+{CORE_GRAMMAR}
+
+Field guidance: `step` is the kebab-case name of this step. `task` says what
+to do, at goal altitude — goals, verifiable stop conditions, pointers, not
+keystroke scripts. `when_to_stop` lists verifiable stop conditions.
+`context` carries everything the step needs (paths, ids, measured facts): a
+continuation is a value, and anything an evaluation needs must be in its
+`task` or `context` or reachable from paths recorded there. Every step must
+tolerate running twice. `when_to_continue` says when an evaluation should
+return successor continuations; "" means the task has no continuation to
+continue and its rendered document offers only the terminal end block.
+Choose the schedule to match what the step actually waits for.
+
+Register the core through the CLI — it is the single writer; never write
+store files yourself:
+
+  agentic-continuation --actor <who> register <task-id> \\
+      --agent claude-code|pi --continuation core.json \\
+      [--single-run] [--must-not "rule"]...
+
+`--continuation -` reads the core from stdin. The task id is kebab-case.
+Each `--must-not` records a task-scoped MUST NOT rule (written without the
+prefix) rendered into every document of that task. Repetitive tasks (the
+default) start a fresh run from this core whenever the previous run
+settles; `--single-run` tasks disable themselves once their run settles.
+"""
+
+BLOCK_RE = re.compile(r"<CONTINUATION>\s*(.*?)\s*</CONTINUATION>", re.DOTALL)
+REGISTRY_RE = re.compile(r"<REGISTRY>\s*(.*?)\s*</REGISTRY>", re.DOTALL)
+
+
+# ----------------------------------------------------------------- utilities
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def now_local() -> datetime:
+    return datetime.now()
+
+
+def stamp() -> str:
+    return now_utc().strftime("%Y%m%dT%H%M%SZ")
+
+
+def atomic_write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+
+def notify_things(title: str, notes: str) -> bool:
+    things = shutil.which("things")
+    if not things:
+        return False
+    try:
+        subprocess.run(
+            [things, "add", "--when=today", f"{title}\n{notes}"],
+            check=True, capture_output=True, timeout=30,
+        )
+        return True
+    except (subprocess.SubprocessError, OSError):
+        return False
+
+
+def _parse_iso_local(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone().replace(tzinfo=None)
+    return parsed
+
+
+# --------------------------------------------------------------- the store
+
+DB_SCHEMA = """
+CREATE TABLE IF NOT EXISTS queue (
+  task_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  cid TEXT NOT NULL,
+  core TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending','consumed','ended','expired','invalid')),
+  origin TEXT NOT NULL,
+  next_activation_at TEXT,
+  registered_at TEXT NOT NULL,
+  last_evaluated_at TEXT,
+  completed_at TEXT,
+  evaluations INTEGER NOT NULL DEFAULT 0,
+  zero_return_streak INTEGER NOT NULL DEFAULT 0,
+  last_summary TEXT,
+  last_actor TEXT,
+  PRIMARY KEY (task_id, run_id, cid)
+);
+CREATE INDEX IF NOT EXISTS queue_activation ON queue (status, next_activation_at);
+CREATE TABLE IF NOT EXISTS tasks (
+  id TEXT PRIMARY KEY,
+  agent TEXT NOT NULL,
+  agent_command TEXT,
+  single_run INTEGER NOT NULL DEFAULT 0,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  must_not TEXT NOT NULL DEFAULT '[]',
+  sandbox TEXT NOT NULL DEFAULT '{}',
+  continuation TEXT NOT NULL,
+  registered_at TEXT NOT NULL,
+  unregistered_at TEXT
+);
+CREATE TABLE IF NOT EXISTS runs (
+  task_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  workspace TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  leased_by TEXT,
+  lease_expires_at TEXT,
+  PRIMARY KEY (task_id, run_id)
+);
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL,
+  cmd TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  task_id TEXT,
+  run_id TEXT,
+  continuation_id TEXT,
+  outcome TEXT,
+  payload TEXT NOT NULL DEFAULT '{}'
+);
+CREATE TABLE IF NOT EXISTS meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+"""
+
+
+def db() -> sqlite3.Connection:
+    STORE.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(STORE / "store.db", timeout=30, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.executescript(DB_SCHEMA)
+    return conn
+
+
+def db_readonly() -> sqlite3.Connection:
+    """A read-only connection: WAL admits concurrent readers while the CLI
+    writes. The serve process handles every request through this — it can
+    never become a second writer."""
+    conn = sqlite3.connect(
+        f"file:{STORE / 'store.db'}?mode=ro", uri=True, timeout=5)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000")
+    return conn
+
+
+_ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"  # Crockford base32
+
+
+def new_ulid() -> str:
+    value = (int(now_utc().timestamp() * 1000) << 80) | secrets.randbits(80)
+    chars = []
+    for _ in range(26):
+        chars.append(_ULID_ALPHABET[value & 31])
+        value >>= 5
+    return "".join(reversed(chars))
+
+
+def ensure_node_id(conn: sqlite3.Connection) -> str:
+    """This store's stable node identity, minted once. Hostnames are
+    display labels; the ULID is what fleet clients key on."""
+    with tx(conn):
+        conn.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('node_id', ?)",
+                     (new_ulid(),))
+    return conn.execute(
+        "SELECT value FROM meta WHERE key='node_id'").fetchone()["value"]
+
+
+_MIRROR_BUFFER: list = []
+
+
+@contextmanager
+def tx(conn: sqlite3.Connection):
+    """One ACID write transaction; the log mirror flushes only on commit."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield
+    except BaseException:
+        conn.execute("ROLLBACK")
+        _MIRROR_BUFFER.clear()
+        raise
+    conn.execute("COMMIT")
+    for entry in _MIRROR_BUFFER:
+        _mirror_event(entry)
+    _MIRROR_BUFFER.clear()
+
+
+def _mirror_event(entry: dict) -> None:
+    """Best-effort append to log.jsonl — a derived export, never truth."""
+    try:
+        with open(STORE / "log.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+EVENT_COLUMNS = ("ts", "cmd", "actor", "task_id", "run_id", "continuation_id", "outcome")
+
+
+def _insert_event(conn: sqlite3.Connection, entry: dict, *, mirror: bool = True) -> None:
+    payload = {k: v for k, v in entry.items() if k not in EVENT_COLUMNS}
+    conn.execute(
+        "INSERT INTO events (ts, cmd, actor, task_id, run_id, continuation_id,"
+        " outcome, payload) VALUES (?,?,?,?,?,?,?,?)",
+        (entry.get("ts", now_utc().isoformat()), entry.get("cmd", "?"),
+         entry.get("actor", "?"), entry.get("task_id"), entry.get("run_id"),
+         entry.get("continuation_id"), entry.get("outcome"),
+         json.dumps(payload, ensure_ascii=False)))
+    if mirror:
+        if conn.in_transaction:
+            _MIRROR_BUFFER.append(entry)
+        else:
+            _mirror_event(entry)
+
+
+def event(conn: sqlite3.Connection, cmd: str, actor: str, *, outcome: str = "ok",
+          task_id: str | None = None, run_id: str | None = None,
+          continuation_id: str | None = None, **payload) -> None:
+    entry = {"ts": now_utc().isoformat(), "cmd": cmd, "actor": actor,
+             "outcome": outcome}
+    if task_id:
+        entry["task_id"] = task_id
+    if run_id:
+        entry["run_id"] = run_id
+    if continuation_id:
+        entry["continuation_id"] = continuation_id
+    entry.update(payload)
+    _insert_event(conn, entry)
+
+
+# ------------------------------------------------------- schema + validation
+
+def validate_schedule(schedule) -> str | None:
+    """None when valid; an error string otherwise."""
+    if not isinstance(schedule, dict) or "mode" not in schedule:
+        return "schedule must be an object with a 'mode'"
+    mode = schedule.get("mode")
+    if mode == "now":
+        return None if set(schedule) == {"mode"} else "schedule.now takes no other keys"
+    if mode == "every":
+        if set(schedule) != {"mode", "amount", "unit"}:
+            return "schedule.every requires exactly: mode, amount, unit"
+        if not isinstance(schedule["amount"], int) or schedule["amount"] < 1:
+            return "schedule.every.amount must be a positive integer"
+        if schedule["unit"] not in ("m", "h", "d"):
+            return "schedule.every.unit must be m, h, or d"
+        return None
+    if mode == "daily":
+        if set(schedule) != {"mode", "at"}:
+            return "schedule.daily requires exactly: mode, at"
+        if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", str(schedule["at"])):
+            return "schedule.daily.at must be HH:MM"
+        return None
+    if mode == "at":
+        if set(schedule) != {"mode", "datetime"}:
+            return "schedule.at requires exactly: mode, datetime"
+        try:
+            datetime.strptime(schedule["datetime"], "%Y-%m-%d %H:%M")
+        except (TypeError, ValueError):
+            return "schedule.at.datetime must be YYYY-MM-DD HH:MM"
+        return None
+    return f"unknown schedule mode {mode!r} for schema_version {SCHEMA_VERSION}"
+
+
+def validate_core(core) -> str | None:
+    """None when valid (normal or terminal); an error string otherwise."""
+    if not isinstance(core, dict):
+        return "continuation must be a JSON object"
+    version = core.get("schema_version")
+    if version not in SUPPORTED_SCHEMAS:
+        return f"unsupported schema_version {version!r} (supported: {sorted(SUPPORTED_SCHEMAS)})"
+    if set(core) == END_KEYS and core.get("step") == "end":
+        return None
+    if set(core) != CORE_KEYS:
+        return f"keys must be exactly {sorted(CORE_KEYS)} (got {sorted(core)})"
+    if not (isinstance(core["step"], str) and KEBAB.fullmatch(core["step"])):
+        return "step must be kebab-case"
+    if core["step"] == "end":
+        return "terminal block must carry exactly schema_version and step"
+    for key in ("task", "context"):
+        if not (isinstance(core[key], str) and core[key].strip()):
+            return f"{key} must be a non-empty string"
+    wtc = core["when_to_continue"]
+    if not isinstance(wtc, str):
+        return "when_to_continue must be a string"
+    if not wtc.strip() and version < 2:
+        return "when_to_continue must be non-empty in schema_version 1"
+    stops = core["when_to_stop"]
+    if not (isinstance(stops, list) and stops
+            and all(isinstance(s, str) and s.strip() for s in stops)):
+        return "when_to_stop must be a non-empty list of strings"
+    return validate_schedule(core["schedule"])
+
+
+def is_terminal(core: dict) -> bool:
+    return set(core) == END_KEYS and core.get("step") == "end"
+
+
+def extract_blocks(text: str) -> tuple[list[dict], list[str]]:
+    """All <CONTINUATION> blocks in `text` → (valid cores, errors)."""
+    cores, errors = [], []
+    for raw in BLOCK_RE.findall(text or ""):
+        try:
+            core = json.loads(raw)
+        except json.JSONDecodeError as error:
+            errors.append(f"invalid JSON in block: {error}")
+            continue
+        problem = validate_core(core)
+        if problem:
+            errors.append(problem)
+        else:
+            cores.append(core)
+    return cores, errors
+
+
+def schedule_due(schedule: dict, last_evaluated: datetime | None, now: datetime) -> bool:
+    last = last_evaluated or datetime(1970, 1, 1)
+    mode = schedule["mode"]
+    if mode == "now":
+        return True
+    if mode == "every":
+        unit = {"m": "minutes", "h": "hours", "d": "days"}[schedule["unit"]]
+        return now - last >= timedelta(**{unit: schedule["amount"]})
+    if mode == "daily":
+        hour, minute = map(int, schedule["at"].split(":"))
+        mark = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        return now >= mark and last < mark
+    if mode == "at":
+        mark = datetime.strptime(schedule["datetime"], "%Y-%m-%d %H:%M")
+        return now >= mark and last < mark
+    return False
+
+
+def next_activation(schedule: dict, last_evaluated: datetime | None,
+                    now: datetime) -> tuple[str, datetime | None]:
+    """The queue position of a pending continuation.
+
+    Returns (state, when): ("due", the moment it became actionable),
+    ("scheduled", the future datetime it activates), or ("expired", None)
+    for a one-shot "at" whose moment was evaluated and returned nothing —
+    it will never activate again and needs a human.
+    """
+    last = last_evaluated or datetime(1970, 1, 1)
+    mode = schedule["mode"]
+    if mode == "now":
+        return ("due", now)
+    if mode == "every":
+        unit = {"m": "minutes", "h": "hours", "d": "days"}[schedule["unit"]]
+        mark = last + timedelta(**{unit: schedule["amount"]})
+        return ("due", mark) if now >= mark else ("scheduled", mark)
+    if mode == "daily":
+        hour, minute = map(int, schedule["at"].split(":"))
+        today = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if now >= today and last < today:
+            return ("due", today)
+        return ("scheduled", today if now < today else today + timedelta(days=1))
+    if mode == "at":
+        mark = datetime.strptime(schedule["datetime"], "%Y-%m-%d %H:%M")
+        if now >= mark and last < mark:
+            return ("due", mark)
+        if now < mark:
+            return ("scheduled", mark)
+        return ("expired", None)
+    return ("expired", None)
+
+
+# ------------------------------------------------------------- rendering
+
+def render_task_section(core: dict) -> str:
+    stops = "\n".join(f"- {item}" for item in core["when_to_stop"])
+    body = (
+        f"{INSTRUCTION}\n"
+        f"## Task\n\n{core['task']}\n\n"
+        f"**Context from the previous step:** {core['context']}\n\n"
+        f"## When to Stop\n\n{stops}\n\n"
+    )
+    if core["when_to_continue"].strip():
+        body += (
+            f"{CONTINUATION_SECTION}\n"
+            f"## When to Continue\n\n{core['when_to_continue']}\n"
+        )
+    else:
+        body += COMPLETION_SECTION
+    return body
+
+
+def render_document(core: dict, task_rules: list[str]) -> str:
+    rules = "".join(f"- You **MUST NOT** {rule}\n" for rule in task_rules)
+    principles = PRINCIPLES + rules if rules else PRINCIPLES
+    body = render_task_section(core)
+    return (
+        "<REGISTRY>\n"
+        + json.dumps(core, indent=2, ensure_ascii=False)
+        + "\n</REGISTRY>\n\n"
+        + HEADER
+        + "\n<TASK>\n````markdown\n"
+        + body
+        + "````\n</TASK>\n\n"
+        + principles
+    )
+
+
+def parse_document_core(text: str) -> dict:
+    """The registered core: the <REGISTRY> block heading the document.
+
+    Documents rendered before edition 2 carried the core as a
+    <CONTINUATION> block before <TASK>; those remain parseable.
+    """
+    head = text.split("<TASK>", 1)[0]
+    blocks = REGISTRY_RE.findall(head) or BLOCK_RE.findall(head)
+    if len(blocks) != 1:
+        raise ValueError(f"expected one core block before <TASK>, found {len(blocks)}")
+    core = json.loads(blocks[0])
+    problem = validate_core(core)
+    if problem:
+        raise ValueError(problem)
+    return core
+
+
+# ------------------------------------------------------------- queue model
+
+def workspace_dir(task_id: str, run_id: str) -> Path:
+    return STORE / "tasks" / task_id / "runs" / run_id
+
+
+def task_row(conn: sqlite3.Connection, task_id: str) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+
+
+def registered_tasks(conn: sqlite3.Connection) -> list:
+    return conn.execute(
+        "SELECT * FROM tasks WHERE unregistered_at IS NULL ORDER BY id").fetchall()
+
+
+def new_cid(conn: sqlite3.Connection, task_id: str, run_id: str, step: str) -> str:
+    taken = {row["cid"] for row in conn.execute(
+        "SELECT cid FROM queue WHERE task_id=? AND run_id=?", (task_id, run_id))}
+    seq = 1
+    while f"{step}--{seq:02d}" in taken:
+        seq += 1
+    return f"{step}--{seq:02d}"
+
+
+def enqueue(conn: sqlite3.Connection, task_id: str, run_id: str, core: dict,
+            origin: str) -> str:
+    """INSERT into THE QUEUE with the activation materialized at write time."""
+    cid = new_cid(conn, task_id, run_id, core["step"])
+    state, when = next_activation(core["schedule"], None, now_local())
+    conn.execute(
+        "INSERT INTO queue (task_id, run_id, cid, core, status, origin,"
+        " next_activation_at, registered_at) VALUES (?,?,?,?,?,?,?,?)",
+        (task_id, run_id, cid, json.dumps(core, ensure_ascii=False),
+         "expired" if state == "expired" else "pending", origin,
+         when.isoformat() if when else None, now_utc().isoformat()))
+    return cid
+
+
+def start_run(conn: sqlite3.Connection, task: sqlite3.Row) -> tuple[str, str]:
+    run_id = stamp()
+    seq = 2
+    while conn.execute("SELECT 1 FROM runs WHERE task_id=? AND run_id=?",
+                       (task["id"], run_id)).fetchone():
+        run_id = f"{stamp()}-{seq}"  # same-second run start must not reuse a run
+        seq += 1
+    workspace = workspace_dir(task["id"], run_id)
+    workspace.mkdir(parents=True, exist_ok=True)
+    conn.execute(
+        "INSERT INTO runs (task_id, run_id, workspace, started_at) VALUES (?,?,?,?)",
+        (task["id"], run_id, str(workspace), now_utc().isoformat()))
+    cid = enqueue(conn, task["id"], run_id, json.loads(task["continuation"]),
+                  "task-continuation")
+    return run_id, cid
+
+
+OPEN_STATUSES = ("pending", "expired", "invalid")  # statuses that keep a run open
+
+
+def active_run(conn: sqlite3.Connection, task_id: str) -> str | None:
+    row = conn.execute(
+        "SELECT run_id FROM queue WHERE task_id=? AND status IN (?,?,?)"
+        " ORDER BY run_id DESC LIMIT 1", (task_id, *OPEN_STATUSES)).fetchone()
+    return row["run_id"] if row else None
+
+
+def run_is_settled(conn: sqlite3.Connection, task_id: str, run_id: str) -> bool:
+    """Settled: every entry consumed or ended. Expired and invalid entries
+    keep the run open — they need a human, and 'run complete' would lie."""
+    return not conn.execute(
+        "SELECT 1 FROM queue WHERE task_id=? AND run_id=? AND status IN (?,?,?)",
+        (task_id, run_id, *OPEN_STATUSES)).fetchone()
+
+
+def acquire_run_lease(conn: sqlite3.Connection, task_id: str, run_id: str,
+                      actor: str) -> bool:
+    """One evaluation per run at a time: an atomic UPDATE claims the lease;
+    an expired lease is broken (and logged) instead of starving the run."""
+    now_iso = now_utc().isoformat()
+    stale = conn.execute(
+        "SELECT leased_by, lease_expires_at FROM runs WHERE task_id=? AND run_id=?"
+        " AND leased_by IS NOT NULL AND lease_expires_at < ?",
+        (task_id, run_id, now_iso)).fetchone()
+    if stale:
+        event(conn, "tick.break-stale-lease", actor, task_id=task_id, run_id=run_id,
+              stale_holder=stale["leased_by"], expired_at=stale["lease_expires_at"])
+    expires = (now_utc() + timedelta(seconds=RUN_LEASE_MAX_AGE_SECONDS)).isoformat()
+    cursor = conn.execute(
+        "UPDATE runs SET leased_by=?, lease_expires_at=? WHERE task_id=? AND"
+        " run_id=? AND (leased_by IS NULL OR lease_expires_at < ?)",
+        (f"pid:{os.getpid()}", expires, task_id, run_id, now_iso))
+    return cursor.rowcount == 1
+
+
+def release_run_lease(conn: sqlite3.Connection, task_id: str, run_id: str) -> None:
+    conn.execute(
+        "UPDATE runs SET leased_by=NULL, lease_expires_at=NULL WHERE task_id=?"
+        " AND run_id=?", (task_id, run_id))
+
+
+# ------------------------------------------------------------- agents
+
+def spawn_agent(task: sqlite3.Row, task_id: str, run_id: str, cid: str,
+                prompt: str, workdir: Path) -> tuple[int, str, str]:
+    """Run the agent over the prompt. Returns (exit, final_text, session_ref)."""
+    repo_root = Path(__file__).resolve().parent.parent
+    env = {
+        **os.environ,
+        "AGENTIC_TASK_ID": task_id,
+        "AGENTIC_RUN_ID": run_id,
+        "AGENTIC_CONTINUATION_ID": cid,
+        "AGENTIC_CLI": str(Path(__file__).resolve()),
+        "AGENTIC_CONTINUATION_STORE": str(STORE),
+    }
+    agent = task["agent"]
+    command = task["agent_command"]
+    if agent == "claude-code":
+        cmd = [
+            command or "claude",
+            "-p", "--output-format", "json",
+            "--permission-mode", "auto",
+            "--plugin-dir", str(repo_root / "plugins" / "claude-code"),
+        ]
+        proc = subprocess.run(
+            cmd, input=prompt, text=True, capture_output=True,
+            cwd=workdir, env=env, timeout=3600,
+        )
+        final_text, session_ref = proc.stdout, ""
+        try:
+            payload = json.loads(proc.stdout)
+            final_text = payload.get("result", proc.stdout)
+            session_ref = payload.get("session_id", "")
+        except (json.JSONDecodeError, AttributeError):
+            pass
+        return proc.returncode, final_text, session_ref
+    if agent == "pi":
+        cmd = [command or "pi", "-p", "--mode", "json", prompt]
+        proc = subprocess.run(
+            cmd, text=True, capture_output=True,
+            cwd=workdir, env=env, timeout=3600,
+        )
+        final_text = proc.stdout
+        try:
+            entries = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
+            texts = [
+                part.get("text", "")
+                for entry in entries
+                if isinstance(entry, dict) and entry.get("role") == "assistant"
+                for part in (entry.get("content") or [])
+                if isinstance(part, dict)
+            ]
+            if texts:
+                final_text = texts[-1]
+        except json.JSONDecodeError:
+            pass
+        return proc.returncode, final_text, ""
+    raise SystemExit(f"unknown agent {agent!r}")
+
+
+# ------------------------------------------------------------- transitions
+
+def apply_evaluation(conn: sqlite3.Connection, task: sqlite3.Row, run_id: str,
+                     from_id: str, text: str, actor: str,
+                     session_ref: str) -> tuple[list[str], bool, list[str]]:
+    """One ACID transaction: the source's status transition, its returned
+    children INSERTed, and the event — all or nothing.
+
+    Returns (registered cids, ended_line, block errors)."""
+    cores, errors = extract_blocks(text)
+    summary = BLOCK_RE.split(text)[0].strip()[-2000:]
+    task_id = task["id"]
+    with tx(conn):
+        row = conn.execute(
+            "SELECT * FROM queue WHERE task_id=? AND run_id=? AND cid=?",
+            (task_id, run_id, from_id)).fetchone()
+        if row is None:
+            raise SystemExit(f"unknown continuation {from_id} in {task_id}/{run_id}")
+        if row["status"] in ("consumed", "ended"):
+            raise SystemExit(
+                f"continuation {from_id} in {task_id}/{run_id} already {row['status']}")
+        evaluations = row["evaluations"] + 1
+        now_iso = now_utc().isoformat()
+        registered, ended = [], False
+        terminal = any(is_terminal(c) for c in cores)
+        normal = [c for c in cores if not is_terminal(c)]
+        for child in normal:
+            registered.append(enqueue(conn, task_id, run_id, child, origin=from_id))
+        if terminal or normal:
+            ended = terminal
+            conn.execute(
+                "UPDATE queue SET status=?, evaluations=?, last_evaluated_at=?,"
+                " completed_at=?, last_summary=?, last_actor=?"
+                " WHERE task_id=? AND run_id=? AND cid=?",
+                ("consumed" if normal else "ended", evaluations, now_iso,
+                 now_iso, summary, actor, task_id, run_id, from_id))
+        else:
+            core = json.loads(row["core"])
+            streak = row["zero_return_streak"] + 1
+            last_local = now_local()
+            state, when = next_activation(core["schedule"], last_local, last_local)
+            conn.execute(
+                "UPDATE queue SET evaluations=?, last_evaluated_at=?,"
+                " zero_return_streak=?, status=?, next_activation_at=?,"
+                " last_summary=?, last_actor=? WHERE task_id=? AND run_id=? AND cid=?",
+                (evaluations, now_iso, streak,
+                 "expired" if state == "expired" else "pending",
+                 when.isoformat() if when else None, summary, actor,
+                 task_id, run_id, from_id))
+        event(conn, "continue", actor, task_id=task_id, run_id=run_id,
+              continuation_id=from_id,
+              outcome="ok" if not errors else "partial",
+              returned=registered, ended_line=ended, invalid_blocks=errors,
+              summary=summary, session_ref=session_ref or "")
+    return registered, ended, errors
+
+
+# ------------------------------------------------------------- subcommands
+
+def cmd_register(args) -> int:
+    if not KEBAB.fullmatch(args.task_id):
+        raise SystemExit("task id must be kebab-case")
+    raw = sys.stdin.read() if args.continuation == "-" else Path(args.continuation).read_text()
+    core = json.loads(raw)
+    problem = validate_core(core)
+    if problem or is_terminal(core):
+        raise SystemExit(
+            "invalid continuation: "
+            + (problem or "a terminal block cannot be a task continuation"))
+    conn = db()
+    with tx(conn):
+        existing = task_row(conn, args.task_id)
+        if existing and existing["unregistered_at"] is None and not args.force:
+            raise SystemExit(f"task {args.task_id} already registered (--force to replace)")
+        conn.execute(
+            "INSERT OR REPLACE INTO tasks (id, agent, agent_command, single_run,"
+            " enabled, must_not, sandbox, continuation, registered_at,"
+            " unregistered_at) VALUES (?,?,?,?,?,?,?,?,?,NULL)",
+            (args.task_id, args.agent, args.agent_command,
+             int(bool(args.single_run)), 1,
+             json.dumps(args.must_not or []),
+             json.dumps({"allow_write": args.allow_write or [],
+                         "allow_net": args.allow_net or [], "enforced": False}),
+             json.dumps(core, ensure_ascii=False), now_utc().isoformat()))
+        event(conn, "register", args.actor, task_id=args.task_id, agent=args.agent,
+              continuation_step=core["step"], single_run=bool(args.single_run))
+    print(f"registered {args.task_id} (agent {args.agent}, continuation step {core['step']})")
+    return 0
+
+
+def cmd_unregister(args) -> int:
+    conn = db()
+    with tx(conn):
+        task = task_row(conn, args.task_id)
+        if task is None or task["unregistered_at"] is not None:
+            raise SystemExit(f"unknown task {args.task_id}")
+        conn.execute("UPDATE tasks SET unregistered_at=? WHERE id=?",
+                     (now_utc().isoformat(), args.task_id))
+        event(conn, "unregister", args.actor, task_id=args.task_id,
+              note="task data retained in store")
+    print(f"unregistered {args.task_id} (queue, runs, and events retained)")
+    return 0
+
+
+def cmd_list(args) -> int:
+    conn = db()
+    now = now_local()
+    tasks = registered_tasks(conn)
+    if not tasks:
+        print("no tasks registered")
+        return 0
+    for task in tasks:
+        flags = [task["agent"]]
+        if task["single_run"]:
+            flags.append("single-run")
+        if not task["enabled"]:
+            flags.append("DISABLED")
+        print(f"{task['id']}  [{', '.join(flags)}]")
+        run_id = active_run(conn, task["id"])
+        if run_id is None:
+            settled = conn.execute(
+                "SELECT COUNT(DISTINCT run_id) FROM runs WHERE task_id=?",
+                (task["id"],)).fetchone()[0]
+            print(f"  no active run ({settled} settled run(s))")
+            continue
+        print(f"  run {run_id}")
+        rows = conn.execute(
+            "SELECT cid, status, core, evaluations, last_evaluated_at FROM queue"
+            " WHERE task_id=? AND run_id=? ORDER BY cid",
+            (task["id"], run_id)).fetchall()
+        for row in rows:
+            if row["status"] != "pending":
+                print(f"    {row['cid']}: {row['status']}")
+                continue
+            core = json.loads(row["core"])
+            last = _parse_iso_local(row["last_evaluated_at"])
+            due = schedule_due(core["schedule"], last, now)
+            print(f"    {row['cid']}: pending, schedule {json.dumps(core['schedule'])}, "
+                  f"evaluations {row['evaluations']}, {'DUE' if due else 'not due'}")
+    event(conn, "list", args.actor)
+    return 0
+
+
+def cmd_show(args) -> int:
+    conn = db()
+    if args.continuation and args.run:
+        row = conn.execute(
+            "SELECT core FROM queue WHERE task_id=? AND run_id=? AND cid=?",
+            (args.task_id, args.run, args.continuation)).fetchone()
+        if row is None:
+            raise SystemExit(
+                f"unknown continuation {args.continuation} in {args.task_id}/{args.run}")
+        core = json.loads(row["core"])
+    else:
+        task = task_row(conn, args.task_id)
+        if task is None:
+            raise SystemExit(f"unknown task {args.task_id}")
+        core = json.loads(task["continuation"])
+    task = task_row(conn, args.task_id)
+    rules = json.loads(task["must_not"]) if task else []
+    sys.stdout.write(render_document(core, rules))
+    event(conn, "show", args.actor, task_id=args.task_id,
+          run_id=args.run or None,
+          continuation_id=args.continuation or "task-continuation")
+    return 0
+
+
+def cmd_authoring(args) -> int:
+    """Print the current edition's core-authoring guide (the program
+    constants — the grammar's single home; plugins must never carry a
+    copy of it)."""
+    sys.stdout.write(AUTHORING)
+    conn = db()
+    event(conn, "authoring", args.actor)
+    return 0
+
+
+def cmd_continue(args) -> int:
+    """Register the continuations an agent RETURNED (blocks in final text)."""
+    text = sys.stdin.read()
+    conn = db()
+    task = task_row(conn, args.task_id)
+    if task is None or task["unregistered_at"] is not None:
+        raise SystemExit(f"unknown task {args.task_id}")
+    registered, _, errors = apply_evaluation(
+        conn, task, args.run, args.from_id, text, args.actor, args.session_ref)
+    if errors:
+        notify_things(
+            f"[{args.task_id}] invalid continuation returns",
+            f"run {args.run}, from {args.from_id}: " + " | ".join(errors)
+            + f"\nagentic-continuation log --task {args.task_id} --run {args.run}",
+        )
+    for cid in registered:
+        print(cid)
+    return 0
+
+
+def cmd_tick(args) -> int:
+    conn = db()
+    evaluated = []
+    for task in registered_tasks(conn):
+        task_id = task["id"]
+        if args.task and task_id != args.task:
+            continue
+        if not task["enabled"]:
+            continue
+        with tx(conn):
+            run_id = active_run(conn, task_id)
+            if run_id is None:
+                has_runs = conn.execute(
+                    "SELECT 1 FROM runs WHERE task_id=? LIMIT 1", (task_id,)).fetchone()
+                if not (task["single_run"] and has_runs):
+                    run_id, first_cid = start_run(conn, task)
+                    event(conn, "tick.start-run", args.actor, task_id=task_id,
+                          run_id=run_id, continuation_id=first_cid)
+        if run_id is None:
+            continue  # single-run task whose one run is settled
+        # Threshold taken AFTER any start_run: a "now"-mode entry enqueued
+        # moments ago materialized its activation from a later clock read
+        # than a loop-top `now`, and must still be selected this tick.
+        pending = conn.execute(
+            "SELECT * FROM queue WHERE task_id=? AND run_id=? AND status='pending'"
+            " AND next_activation_at <= ? ORDER BY next_activation_at",
+            (task_id, run_id, now_local().isoformat())).fetchall()
+        for row in pending:
+            cid = row["cid"]
+            core = json.loads(row["core"])
+            problem = validate_core(core)
+            if problem:
+                # Unreadable by THIS tool version (e.g. a newer edition after
+                # a downgrade): quarantine loudly rather than reinterpret.
+                with tx(conn):
+                    conn.execute(
+                        "UPDATE queue SET status='invalid' WHERE task_id=? AND"
+                        " run_id=? AND cid=?", (task_id, run_id, cid))
+                    event(conn, "tick.evaluate", args.actor, task_id=task_id,
+                          run_id=run_id, continuation_id=cid,
+                          outcome="invalid-continuation", error=problem)
+                notify_things(f"[{task_id}] invalid continuation quarantined",
+                              f"{run_id}/{cid}: {problem}")
+                continue
+            if args.dry_run:
+                print(f"would evaluate {task_id}/{run_id}/{cid}")
+                evaluated.append(f"{task_id}/{run_id}/{cid}")
+                continue
+            with tx(conn):
+                leased = acquire_run_lease(conn, task_id, run_id, args.actor)
+            if not leased:
+                break  # another dispatcher is evaluating this run
+            prompt = render_document(core, json.loads(task["must_not"]))
+            workdir = workspace_dir(task_id, run_id)
+            workdir.mkdir(parents=True, exist_ok=True)
+            atomic_write(
+                workdir / f"prompt--{cid}--{row['evaluations'] + 1:03d}.md", prompt)
+            try:
+                code, final_text, session_ref = spawn_agent(
+                    task, task_id, run_id, cid, prompt, workdir)
+            except (subprocess.SubprocessError, OSError) as error:
+                with tx(conn):
+                    event(conn, "tick.evaluate", args.actor, task_id=task_id,
+                          run_id=run_id, continuation_id=cid,
+                          outcome="spawn-error", error=str(error))
+                    release_run_lease(conn, task_id, run_id)
+                notify_things(f"[{task_id}] agent spawn failed", f"{cid}: {error}")
+                continue
+            with tx(conn):
+                event(conn, "tick.evaluate", args.actor, task_id=task_id,
+                      run_id=run_id, continuation_id=cid,
+                      outcome="ok" if code == 0 else f"agent-exit-{code}",
+                      session_ref=session_ref)
+                release_run_lease(conn, task_id, run_id)
+            # The claude-code stop-hook plugin normally performs `continue`
+            # during the run — but it reads the transcript FILE, which may
+            # not have flushed the final message yet (observed live). The
+            # dispatcher's captured output IS the final message, so run the
+            # fallback whenever the hook either never ran (evaluations
+            # unchanged) OR ran against a stale transcript (still pending
+            # while the authoritative text carries blocks). A stale-hook
+            # rescue double-counts one evaluation; the events show both.
+            after = conn.execute(
+                "SELECT status, evaluations FROM queue WHERE task_id=? AND"
+                " run_id=? AND cid=?", (task_id, run_id, cid)).fetchone()
+            captured_cores, _ = extract_blocks(final_text)
+            hook_never_ran = after["evaluations"] == row["evaluations"]
+            hook_ran_stale = (not hook_never_ran and after["status"] == "pending"
+                              and bool(captured_cores))
+            if hook_never_ran or hook_ran_stale:
+                apply_evaluation(conn, task, run_id, cid, final_text,
+                                 "dispatcher-fallback", session_ref)
+            evaluated.append(f"{task_id}/{run_id}/{cid}")
+            after = conn.execute(
+                "SELECT status, zero_return_streak FROM queue WHERE task_id=?"
+                " AND run_id=? AND cid=?", (task_id, run_id, cid)).fetchone()
+            if (after["status"] == "pending" and after["zero_return_streak"]
+                    and after["zero_return_streak"] % 5 == 0):
+                notify_things(
+                    f"[{task_id}] possibly stuck",
+                    f"{cid} evaluated {after['zero_return_streak']} times with no return.\n"
+                    f"agentic-continuation log --task {task_id} --run {run_id}",
+                )
+        if not args.dry_run and run_is_settled(conn, task_id, run_id):
+            with tx(conn):
+                event(conn, "tick.run-settled", args.actor, task_id=task_id,
+                      run_id=run_id)
+                if task["single_run"]:
+                    conn.execute("UPDATE tasks SET enabled=0 WHERE id=?", (task_id,))
+            notify_things(
+                f"[{task_id}] run complete",
+                f"run {run_id} settled — every line of work ended.\n"
+                f"agentic-continuation log --task {task_id} --run {run_id}",
+            )
+    event(conn, "tick", args.actor, evaluated=evaluated, dry_run=bool(args.dry_run))
+    if args.dry_run and not evaluated:
+        print("nothing due")
+    return 0
+
+
+def collect_queue(conn: sqlite3.Connection, now: datetime) -> dict:
+    """THE QUEUE, read directly off the primary table.
+
+    Sections: due (activation reached, oldest first), scheduled (future,
+    soonest first), attention (expired one-shots, invalid entries, and
+    entries of paused tasks — a human's move). Consumed and ended entries
+    are history: visible via `list` and `log`, not queued."""
+    due, scheduled, attention = [], [], []
+    rows = conn.execute(
+        "SELECT q.*, t.enabled AS task_enabled FROM queue q"
+        " JOIN tasks t ON t.id = q.task_id"
+        " WHERE t.unregistered_at IS NULL AND q.status IN (?,?,?)"
+        " ORDER BY q.next_activation_at", OPEN_STATUSES).fetchall()
+    for row in rows:
+        core = json.loads(row["core"])
+        entry = {
+            "task": row["task_id"], "run": row["run_id"],
+            "continuation": row["cid"], "status": row["status"],
+            "enabled": bool(row["task_enabled"]),
+            "evaluations": row["evaluations"],
+            "zero_return_streak": row["zero_return_streak"],
+            "registered_at": row["registered_at"],
+            "origin": row["origin"],
+            "schedule": core.get("schedule"),
+            "activation": row["next_activation_at"],
+        }
+        if row["last_summary"]:
+            entry["last_summary"] = row["last_summary"][:200]
+            entry["last_actor"] = row["last_actor"] or ""
+        if row["status"] == "invalid":
+            entry["state"] = "invalid"
+            attention.append(entry)
+        elif not row["task_enabled"]:
+            entry["state"] = "paused"
+            attention.append(entry)
+        elif row["status"] == "expired":
+            entry["state"] = "expired"
+            attention.append(entry)
+        elif row["next_activation_at"] and row["next_activation_at"] <= now.isoformat():
+            entry["state"] = "due"
+            due.append(entry)
+        else:
+            entry["state"] = "scheduled"
+            scheduled.append(entry)
+    return {"generated_at": now.isoformat(), "due": due,
+            "scheduled": scheduled, "attention": attention}
+
+
+def _format_wait(now: datetime, iso: str | None) -> str:
+    if not iso:
+        return "—"
+    delta = datetime.fromisoformat(iso) - now
+    seconds = int(delta.total_seconds())
+    sign = "in " if seconds >= 0 else ""
+    seconds = abs(seconds)
+    if seconds < 90:
+        text = f"{seconds}s"
+    elif seconds < 5400:
+        text = f"{seconds // 60}m"
+    elif seconds < 90000:
+        text = f"{seconds // 3600}h {seconds % 3600 // 60:02d}m"
+    else:
+        text = f"{seconds // 86400}d {seconds % 86400 // 3600}h"
+    return sign + text if sign else text + " overdue"
+
+
+def cmd_queue(args) -> int:
+    conn = db()
+    now = now_local()
+    queue = collect_queue(conn, now)
+    if args.json:
+        print(json.dumps(queue, indent=2, ensure_ascii=False))
+        return 0
+    # Expired / invalid / paused are distinct piles, never an umbrella:
+    # each names exactly why the scheduler will not act on its own.
+    by_state: dict = {"expired": [], "invalid": [], "paused": []}
+    for entry in queue["attention"]:
+        by_state.setdefault(entry["state"], []).append(entry)
+    counts = f"{len(queue['due'])} due, {len(queue['scheduled'])} scheduled"
+    for state in by_state:
+        if by_state[state]:
+            counts += f", {len(by_state[state])} {state}"
+    print(f"QUEUE — {counts}")
+    position = 0
+    sections = [("due", "DUE", queue["due"]),
+                ("scheduled", "SCHEDULED", queue["scheduled"])]
+    sections += [(state, state.upper(), entries)
+                 for state, entries in by_state.items()]
+    for section, title, entries in sections:
+        if not entries:
+            continue
+        print(f"\n{title}")
+        for entry in entries:
+            position += 1
+            when = ("now" if section == "due"
+                    else _format_wait(now, entry.get("activation"))
+                    if section == "scheduled" else entry["state"])
+            schedule = json.dumps(entry.get("schedule", {})) if entry.get("schedule") else ""
+            print(f"{position:3d}. [{when}] {entry['task']} / {entry['run']} / "
+                  f"{entry['continuation']}")
+            detail = (f"     {schedule}  evaluations {entry['evaluations']}"
+                      + (f", streak {entry['zero_return_streak']}"
+                         if entry.get("zero_return_streak") else ""))
+            print(detail)
+            if entry.get("last_summary"):
+                print(f"     last: {entry['last_summary'][:110]}")
+    if position == 0:
+        print("\n(the queue is empty)")
+    return 0
+
+
+def cmd_log(args) -> int:
+    conn = db()
+    clauses, params = [], []
+    if args.task:
+        clauses.append("task_id = ?")
+        params.append(args.task)
+    if args.run:
+        clauses.append("run_id = ?")
+        params.append(args.run)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = conn.execute(
+        f"SELECT * FROM events {where} ORDER BY id", params).fetchall()
+    if not rows:
+        print("no log yet" if not clauses else "")
+        return 0
+    if args.limit:
+        rows = rows[-args.limit:]
+    for row in rows:
+        entry = {"ts": row["ts"], "cmd": row["cmd"], "actor": row["actor"]}
+        for key in ("task_id", "run_id", "continuation_id", "outcome"):
+            if row[key] is not None:
+                entry[key] = row[key]
+        entry.update(json.loads(row["payload"]))
+        print(json.dumps(entry, ensure_ascii=False))
+    return 0
+
+
+def cmd_verify(args) -> int:
+    """Heuristic v1: stat absolute paths mentioned in recorded contexts."""
+    conn = db()
+    findings = []
+    rows = conn.execute(
+        "SELECT run_id, cid, core FROM queue WHERE task_id=?"
+        " ORDER BY run_id, cid", (args.task_id,)).fetchall()
+    for row in rows:
+        core = json.loads(row["core"])
+        for match in re.findall(r"(?:~|/)[\w./~-]+", core["context"]):
+            path = Path(match).expanduser()
+            if path.suffix or path.exists():
+                findings.append((f"{row['run_id']}/{row['cid']}", str(path),
+                                 path.exists()))
+    for where, path, exists in findings:
+        print(f"{'OK  ' if exists else 'MISS'} {where}: {path}")
+    event(conn, "verify", args.actor, task_id=args.task_id,
+          missing=[p for _, p, ok in findings if not ok])
+    return 0 if all(ok for *_, ok in findings) else 1
+
+
+def cmd_migrate(args) -> int:
+    """One-time import of the pre-SQLite file store into the queue."""
+    legacy = STORE / "registry.json"
+    if not legacy.exists():
+        print("no legacy file store to migrate")
+        return 0
+    registry = json.loads(legacy.read_text(encoding="utf-8"))
+    conn = db()
+    counts = {"tasks": 0, "runs": 0, "queue": 0, "events": 0}
+    events_imported = bool(conn.execute(
+        "SELECT 1 FROM events WHERE cmd='migrate' LIMIT 1").fetchone())
+    with tx(conn):
+        for task_id, task in sorted(registry.get("tasks", {}).items()):
+            doc_path = STORE / "tasks" / task_id / "continuation.md"
+            core = parse_document_core(doc_path.read_text(encoding="utf-8"))
+            conn.execute(
+                "INSERT OR REPLACE INTO tasks (id, agent, agent_command,"
+                " single_run, enabled, must_not, sandbox, continuation,"
+                " registered_at, unregistered_at) VALUES (?,?,?,?,?,?,?,?,?,NULL)",
+                (task_id, task.get("agent", "claude-code"),
+                 task.get("agent_command"), int(task.get("single_run", False)),
+                 int(task.get("enabled", True)),
+                 json.dumps(task.get("must_not", [])),
+                 json.dumps(task.get("sandbox", {})),
+                 json.dumps(core, ensure_ascii=False),
+                 task.get("registered_at", now_utc().isoformat())))
+            counts["tasks"] += 1
+            runs_dir = STORE / "tasks" / task_id / "runs"
+            if not runs_dir.exists():
+                continue
+            for run_path in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
+                run_id = run_path.name
+                conn.execute(
+                    "INSERT OR REPLACE INTO runs (task_id, run_id, workspace,"
+                    " started_at) VALUES (?,?,?,?)",
+                    (task_id, run_id, str(run_path), run_id))
+                counts["runs"] += 1
+                for state_path in sorted((run_path / "continuations").glob("*.state.json")):
+                    cid = state_path.name[: -len(".state.json")]
+                    state = json.loads(state_path.read_text(encoding="utf-8"))
+                    entry_core = parse_document_core(
+                        state_path.with_name(f"{cid}.md").read_text(encoding="utf-8"))
+                    status = state.get("status", "pending")
+                    last = _parse_iso_local(state.get("last_evaluated_at"))
+                    if status == "pending":
+                        astate, when = next_activation(
+                            entry_core["schedule"], last, now_local())
+                        status = "expired" if astate == "expired" else "pending"
+                        activation = when.isoformat() if when else None
+                        completed = None
+                    else:
+                        activation, completed = None, state.get("last_evaluated_at")
+                    conn.execute(
+                        "INSERT OR REPLACE INTO queue (task_id, run_id, cid, core,"
+                        " status, origin, next_activation_at, registered_at,"
+                        " last_evaluated_at, completed_at, evaluations,"
+                        " zero_return_streak) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (task_id, run_id, cid,
+                         json.dumps(entry_core, ensure_ascii=False), status,
+                         state.get("origin", ""), activation,
+                         state.get("registered_at", ""),
+                         state.get("last_evaluated_at"), completed,
+                         state.get("evaluations", 0),
+                         state.get("zero_return_streak", 0)))
+                    counts["queue"] += 1
+        legacy_log = STORE / "log.jsonl"
+        if legacy_log.exists() and not events_imported:
+            for line in legacy_log.read_text(encoding="utf-8").splitlines():
+                try:
+                    _insert_event(conn, json.loads(line), mirror=False)
+                    counts["events"] += 1
+                except (json.JSONDecodeError, sqlite3.Error):
+                    continue
+        # Backfill each entry's last summary from its last `continue` event.
+        for row in conn.execute("SELECT task_id, run_id, cid FROM queue").fetchall():
+            last_continue = conn.execute(
+                "SELECT actor, payload FROM events WHERE cmd='continue' AND"
+                " task_id=? AND run_id=? AND continuation_id=?"
+                " ORDER BY id DESC LIMIT 1",
+                (row["task_id"], row["run_id"], row["cid"])).fetchone()
+            if last_continue:
+                summary = json.loads(last_continue["payload"]).get("summary")
+                if summary:
+                    conn.execute(
+                        "UPDATE queue SET last_summary=?, last_actor=? WHERE"
+                        " task_id=? AND run_id=? AND cid=? AND last_summary IS NULL",
+                        (summary, last_continue["actor"],
+                         row["task_id"], row["run_id"], row["cid"]))
+        event(conn, "migrate", args.actor, imported=counts)
+    os.replace(legacy, STORE / "registry.json.imported")
+    print(f"migrated: {counts['tasks']} task(s), {counts['runs']} run(s), "
+          f"{counts['queue']} queue entries, {counts['events']} event(s)")
+    print("legacy registry.json -> registry.json.imported (file data retained)")
+    return 0
+
+
+def launchd_daemon_plist(label: str, subcommand: list) -> bytes:
+    """A LaunchDaemon plist for headless machines: system domain, runs as
+    the invoking (sudo's invoking) user with an explicit HOME so the store
+    resolves to that user, interpreter pinned to the one running this
+    install (on CLT-less machines that is a uv-managed python)."""
+    import plistlib
+    import pwd
+    user = os.environ.get("SUDO_USER") or pwd.getpwuid(os.getuid()).pw_name
+    home = pwd.getpwnam(user).pw_dir
+    payload: dict = {
+        "Label": label,
+        "ProgramArguments": [sys.executable, str(Path(__file__).resolve()),
+                             "--actor", "dispatcher", *subcommand],
+        "UserName": user,
+        "EnvironmentVariables": {"HOME": home},
+        "StandardOutPath": f"/tmp/{label}.out",
+        "StandardErrorPath": f"/tmp/{label}.err",
+    }
+    if subcommand == ["serve"]:
+        payload["RunAtLoad"] = True
+        payload["KeepAlive"] = True
+    else:
+        payload["StartInterval"] = 1800
+    return plistlib.dumps(payload)
+
+
+def _install_daemon(label: str, subcommand: list) -> int:
+    """Write + load the system-domain daemon. Deliberately touches the
+    store not at all: under sudo, any db() write would leave root-owned
+    files in (or outside) the user's store."""
+    if os.geteuid() != 0:
+        raise SystemExit(f"--daemon writes /Library/LaunchDaemons — run under sudo")
+    dest = Path("/Library/LaunchDaemons") / f"{label}.plist"
+    dest.write_bytes(launchd_daemon_plist(label, subcommand))
+    os.chown(dest, 0, 0)
+    os.chmod(dest, 0o644)
+    subprocess.run(["launchctl", "bootout", f"system/{label}"], capture_output=True)
+    subprocess.run(["launchctl", "bootstrap", "system", str(dest)], check=True)
+    print(f"bootstrapped {label} (system daemon, runs as "
+          f"{os.environ.get('SUDO_USER') or 'root'})")
+    return 0
+
+
+def _uninstall_daemon(label: str) -> int:
+    if os.geteuid() != 0:
+        raise SystemExit(f"--daemon removes /Library/LaunchDaemons — run under sudo")
+    dest = Path("/Library/LaunchDaemons") / f"{label}.plist"
+    subprocess.run(["launchctl", "bootout", f"system/{label}"], capture_output=True)
+    dest.unlink(missing_ok=True)
+    print(f"booted out and removed {label}")
+    return 0
+
+
+def cmd_install_launchd(args) -> int:
+    if args.daemon:
+        return _install_daemon(LABEL, ["tick"])
+    plist_src = Path(__file__).resolve().parent.parent / "launchd" / f"{LABEL}.plist"
+    dest = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+    shutil.copyfile(plist_src, dest)
+    subprocess.run(["launchctl", "unload", str(dest)], capture_output=True)
+    subprocess.run(["launchctl", "load", str(dest)], check=True)
+    conn = db()
+    event(conn, "install-launchd", args.actor)
+    print(f"loaded {LABEL} (tick every 30 min)")
+    return 0
+
+
+def cmd_uninstall_launchd(args) -> int:
+    if args.daemon:
+        return _uninstall_daemon(LABEL)
+    dest = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+    subprocess.run(["launchctl", "unload", str(dest)], capture_output=True)
+    dest.unlink(missing_ok=True)
+    conn = db()
+    event(conn, "uninstall-launchd", args.actor)
+    print(f"unloaded and removed {LABEL}")
+    return 0
+
+
+# ------------------------------------------------------- node API server
+#
+# The node protocol (v1): read-only JSON over HTTP plus an SSE tail of the
+# events table (`events.id` is the cursor; `Last-Event-ID` resumes it).
+# The Mac app is the first client; a peer node doing handoff later speaks
+# the same protocol. Request handling opens the store read-only ONLY —
+# writes stay the CLI's alone. Auth is an exposure-layer concern (LAN
+# trust today, an authenticating edge like Cloudflare Access when public);
+# the protocol itself carries none.
+
+RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
+PROMPT_NAME_RE = re.compile(r"^prompt--[A-Za-z0-9][A-Za-z0-9._-]*\.md$")
+
+
+def node_display_name() -> str:
+    """The user-facing machine name ("Mac mini"), not the bare hostname
+    ("mac"). scutil is macOS-only and lives outside minimal PATHs, so it
+    is invoked by absolute path with the hostname as fallback."""
+    scutil = "/usr/sbin/scutil"
+    if os.path.exists(scutil):
+        try:
+            proc = subprocess.run([scutil, "--get", "ComputerName"],
+                                  capture_output=True, text=True, timeout=10)
+            if proc.returncode == 0 and proc.stdout.strip():
+                return proc.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return socket.gethostname()
+
+
+def event_row_payload(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"], "ts": row["ts"], "cmd": row["cmd"],
+        "actor": row["actor"], "task_id": row["task_id"],
+        "run_id": row["run_id"], "continuation_id": row["continuation_id"],
+        "outcome": row["outcome"], "payload": json.loads(row["payload"]),
+    }
+
+
+def task_payload(conn: sqlite3.Connection, task: sqlite3.Row) -> dict:
+    return {
+        "id": task["id"], "agent": task["agent"],
+        "agent_command": task["agent_command"],
+        "single_run": bool(task["single_run"]),
+        "enabled": bool(task["enabled"]),
+        "must_not": json.loads(task["must_not"]),
+        "sandbox": json.loads(task["sandbox"]),
+        "continuation": json.loads(task["continuation"]),
+        "registered_at": task["registered_at"],
+        "unregistered_at": task["unregistered_at"],
+        "active_run": active_run(conn, task["id"]),
+        "run_count": conn.execute(
+            "SELECT COUNT(*) FROM runs WHERE task_id=?",
+            (task["id"],)).fetchone()[0],
+    }
+
+
+def queue_entry_payload(row: sqlite3.Row) -> dict:
+    return {
+        "cid": row["cid"], "status": row["status"], "origin": row["origin"],
+        "core": json.loads(row["core"]),
+        "activation": row["next_activation_at"],
+        "registered_at": row["registered_at"],
+        "last_evaluated_at": row["last_evaluated_at"],
+        "completed_at": row["completed_at"],
+        "evaluations": row["evaluations"],
+        "zero_return_streak": row["zero_return_streak"],
+        "last_summary": row["last_summary"], "last_actor": row["last_actor"],
+    }
+
+
+class NodeAPI(BaseHTTPRequestHandler):
+    server_version = f"agentic-continuation/{VERSION}"
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *_args) -> None:
+        pass  # launchd stderr stays for errors, not access logs
+
+    def do_GET(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler API
+        try:
+            self._route()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as error:  # noqa: BLE001 — a request never kills the server
+            try:
+                self._json({"error": f"{type(error).__name__}: {error}"}, 500)
+            except (BrokenPipeError, ConnectionResetError, ValueError):
+                pass
+
+    def _json(self, payload, status: int = 200) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _text(self, content: str, status: int = 200) -> None:
+        body = content.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/markdown; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _route(self) -> None:
+        parsed = urllib.parse.urlsplit(self.path)
+        parts = [p for p in parsed.path.split("/") if p]
+        query = {key: values[-1]
+                 for key, values in urllib.parse.parse_qs(parsed.query).items()}
+        if len(parts) < 2 or parts[0] != PROTO:
+            return self._json({"error": "unknown endpoint"}, 404)
+        head, rest = parts[1], parts[2:]
+        if head == "node" and not rest:
+            return self._node()
+        if head == "queue" and not rest:
+            conn = db_readonly()
+            return self._json(collect_queue(conn, now_local()))
+        if head == "log" and not rest:
+            return self._log(query)
+        if head == "events" and not rest:
+            return self._sse(query)
+        if head == "tasks":
+            return self._tasks(rest, query)
+        return self._json({"error": "unknown endpoint"}, 404)
+
+    def _node(self) -> None:
+        conn = db_readonly()
+        last_tick = conn.execute(
+            "SELECT ts FROM events WHERE cmd='tick' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        queue = collect_queue(conn, now_local())
+        # The tick job may live in the user domain (LaunchAgent, GUI
+        # machines) or the system domain (LaunchDaemon, headless machines);
+        # check both.
+        try:
+            tick_agent_loaded = (
+                subprocess.run(["launchctl", "list", LABEL],
+                               capture_output=True, timeout=10).returncode == 0
+                or subprocess.run(["launchctl", "print", f"system/{LABEL}"],
+                                  capture_output=True, timeout=10).returncode == 0)
+        except (OSError, subprocess.SubprocessError):
+            tick_agent_loaded = None
+        self._json({
+            "proto": PROTO, "node_id": self.server.node_id,
+            "hostname": socket.gethostname(),
+            "display_name": self.server.display_name, "version": VERSION,
+            "schema_versions": sorted(SUPPORTED_SCHEMAS),
+            "now": now_utc().isoformat(),
+            "started_at": self.server.started_at,
+            "last_tick_at": last_tick["ts"] if last_tick else None,
+            "tick_agent_loaded": tick_agent_loaded,
+            "queue_counts": {section: len(queue[section])
+                             for section in ("due", "scheduled", "attention")},
+        })
+
+    def _log(self, query: dict) -> None:
+        conn = db_readonly()
+        clauses, params = [], []
+        if query.get("task"):
+            clauses.append("task_id = ?")
+            params.append(query["task"])
+        if query.get("run"):
+            clauses.append("run_id = ?")
+            params.append(query["run"])
+        limit = min(int(query.get("limit", 200)), 1000)
+        after = query.get("after")
+        if after is not None:
+            clauses.append("id > ?")
+            params.append(int(after))
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        order = "ASC" if after is not None else "DESC"
+        rows = conn.execute(
+            f"SELECT * FROM events {where} ORDER BY id {order} LIMIT ?",
+            (*params, limit)).fetchall()
+        self._json({"events": [event_row_payload(row) for row in rows]})
+
+    def _tasks(self, rest: list, query: dict) -> None:
+        conn = db_readonly()
+        if not rest:
+            where = "" if query.get("all") else "WHERE unregistered_at IS NULL"
+            rows = conn.execute(f"SELECT * FROM tasks {where} ORDER BY id").fetchall()
+            return self._json({"tasks": [task_payload(conn, row) for row in rows]})
+        task_id = rest[0]
+        if not KEBAB.fullmatch(task_id):
+            return self._json({"error": "unknown endpoint"}, 404)
+        task = task_row(conn, task_id)
+        if task is None:
+            return self._json({"error": f"unknown task {task_id}"}, 404)
+        if not rest[1:]:
+            payload = task_payload(conn, task)
+            payload["runs"] = []
+            runs = conn.execute(
+                "SELECT * FROM runs WHERE task_id=? ORDER BY run_id DESC",
+                (task_id,)).fetchall()
+            for run in runs:
+                entries = conn.execute(
+                    "SELECT * FROM queue WHERE task_id=? AND run_id=?"
+                    " ORDER BY registered_at, cid",
+                    (task_id, run["run_id"])).fetchall()
+                payload["runs"].append({
+                    "run_id": run["run_id"], "started_at": run["started_at"],
+                    "leased_by": run["leased_by"],
+                    "lease_expires_at": run["lease_expires_at"],
+                    "settled": run_is_settled(conn, task_id, run["run_id"]),
+                    "entries": [queue_entry_payload(row) for row in entries],
+                })
+            return self._json(payload)
+        if len(rest) >= 3 and rest[1] == "runs" and rest[3:4] == ["prompts"]:
+            run_id = rest[2]
+            if not RUN_ID_RE.fullmatch(run_id):
+                return self._json({"error": "unknown endpoint"}, 404)
+            workspace = workspace_dir(task_id, run_id)
+            if not workspace.is_dir():
+                return self._json({"error": f"unknown run {run_id}"}, 404)
+            if len(rest) == 4:
+                prompts = sorted(workspace.glob("prompt--*.md"))
+                return self._json({"prompts": [
+                    {"name": path.name, "size": path.stat().st_size}
+                    for path in prompts]})
+            if len(rest) == 5:
+                name = rest[4]
+                path = workspace / name
+                if not (PROMPT_NAME_RE.fullmatch(name)
+                        and path.resolve().parent == workspace.resolve()
+                        and path.is_file()):
+                    return self._json({"error": "unknown prompt"}, 404)
+                return self._text(path.read_text(encoding="utf-8"))
+        return self._json({"error": "unknown endpoint"}, 404)
+
+    def _sse(self, query: dict) -> None:
+        cursor = int(query.get("after")
+                     or self.headers.get("Last-Event-ID")
+                     or 0)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        conn = db_readonly()
+        last_beat = time.monotonic()
+        while True:
+            rows = conn.execute(
+                "SELECT * FROM events WHERE id > ? ORDER BY id LIMIT 500",
+                (cursor,)).fetchall()
+            for row in rows:
+                cursor = row["id"]
+                data = json.dumps(event_row_payload(row), ensure_ascii=False)
+                self.wfile.write(f"id: {cursor}\ndata: {data}\n\n".encode("utf-8"))
+            if time.monotonic() - last_beat >= 15:
+                self.wfile.write(b": keep-alive\n\n")
+                last_beat = time.monotonic()
+            self.wfile.flush()
+            time.sleep(self.server.sse_poll)
+
+
+class NodeServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self, address, node_id: str, sse_poll: float,
+                 display_name: str):
+        self.node_id = node_id
+        self.sse_poll = sse_poll
+        self.display_name = display_name
+        self.started_at = now_utc().isoformat()
+        super().__init__(address, NodeAPI)
+
+
+def cmd_serve(args) -> int:
+    conn = db()
+    node_id = ensure_node_id(conn)
+    event(conn, "serve", args.actor, port=args.port, bind=args.bind)
+    conn.close()  # serving holds no writable connection
+    display_name = node_display_name()
+    httpd = NodeServer((args.bind, args.port), node_id, args.sse_poll,
+                       display_name)
+    port = httpd.server_address[1]
+    # Advertise only what you can deliver: a loopback bind is unreachable
+    # from other machines, and advertising it would plant a ghost node in
+    # every browser on the network.
+    loopback = args.bind.startswith("127.") or args.bind in ("::1", "localhost")
+    mdns = None
+    if not args.no_mdns and not loopback and shutil.which("dns-sd"):
+        mdns = subprocess.Popen(
+            ["dns-sd", "-R", display_name, MDNS_SERVICE,
+             ".", str(port), f"nodeid={node_id}", f"proto={PROTO}"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    note = ", not advertised: loopback bind" if loopback else ""
+    print(f"serving node {node_id} on {args.bind}:{port} (proto {PROTO}{note})",
+          flush=True)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if mdns:
+            mdns.terminate()
+        httpd.server_close()
+    return 0
+
+
+def cmd_install_serve_launchd(args) -> int:
+    if args.daemon:
+        return _install_daemon(SERVE_LABEL, ["serve"])
+    plist_src = Path(__file__).resolve().parent.parent / "launchd" / f"{SERVE_LABEL}.plist"
+    dest = Path.home() / "Library" / "LaunchAgents" / f"{SERVE_LABEL}.plist"
+    shutil.copyfile(plist_src, dest)
+    subprocess.run(["launchctl", "unload", str(dest)], capture_output=True)
+    subprocess.run(["launchctl", "load", str(dest)], check=True)
+    conn = db()
+    event(conn, "install-serve-launchd", args.actor)
+    print(f"loaded {SERVE_LABEL} (node API on port {DEFAULT_SERVE_PORT})")
+    return 0
+
+
+def cmd_uninstall_serve_launchd(args) -> int:
+    if args.daemon:
+        return _uninstall_daemon(SERVE_LABEL)
+    dest = Path.home() / "Library" / "LaunchAgents" / f"{SERVE_LABEL}.plist"
+    subprocess.run(["launchctl", "unload", str(dest)], capture_output=True)
+    dest.unlink(missing_ok=True)
+    conn = db()
+    event(conn, "uninstall-serve-launchd", args.actor)
+    print(f"unloaded and removed {SERVE_LABEL}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="agentic-continuation", description=__doc__)
+    parser.add_argument("--actor", default="human",
+                        help="Who is invoking (human | agent-plugin |"
+                             " interactive-agent | dispatcher).")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("authoring",
+                       help="Print the current edition's core-authoring guide.")
+    p.set_defaults(fn=cmd_authoring)
+
+    p = sub.add_parser("register", help="Register a task with its continuation.")
+    p.add_argument("task_id")
+    p.add_argument("--agent", choices=("claude-code", "pi"), required=True)
+    p.add_argument("--continuation", required=True,
+                   help="Continuation core JSON file, or - for stdin.")
+    p.add_argument("--single-run", action="store_true")
+    p.add_argument("--must-not", action="append",
+                   help="Task-scoped MUST NOT rule (repeatable), without the prefix.")
+    p.add_argument("--allow-write", action="append")
+    p.add_argument("--allow-net", action="append")
+    p.add_argument("--agent-command", default=None,
+                   help="Override the agent binary (testing / custom installs).")
+    p.add_argument("--force", action="store_true")
+    p.set_defaults(fn=cmd_register)
+
+    p = sub.add_parser("unregister", help="Remove a task from the registry.")
+    p.add_argument("task_id")
+    p.set_defaults(fn=cmd_unregister)
+
+    p = sub.add_parser("list", help="Tasks, runs, continuations, due-state.")
+    p.set_defaults(fn=cmd_list)
+
+    p = sub.add_parser("show", help="Render a continuation document.")
+    p.add_argument("task_id")
+    p.add_argument("--run")
+    p.add_argument("--continuation")
+    p.set_defaults(fn=cmd_show)
+
+    p = sub.add_parser("continue", help="Register an agent's returned continuations (stdin: final message).")
+    p.add_argument("task_id")
+    p.add_argument("--run", required=True)
+    p.add_argument("--from", dest="from_id", required=True)
+    p.add_argument("--session-ref", default="")
+    p.set_defaults(fn=cmd_continue)
+
+    p = sub.add_parser("tick", help="Evaluate every due continuation.")
+    p.add_argument("--task")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=cmd_tick)
+
+    p = sub.add_parser("queue", help="THE queue: open entries in activation order.")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_queue)
+
+    p = sub.add_parser("log", help="Read the events log.")
+    p.add_argument("--task")
+    p.add_argument("--run")
+    p.add_argument("-n", dest="limit", type=int, default=0)
+    p.set_defaults(fn=cmd_log)
+
+    p = sub.add_parser("verify", help="Check artifact paths claimed in contexts.")
+    p.add_argument("task_id")
+    p.set_defaults(fn=cmd_verify)
+
+    p = sub.add_parser("migrate", help="Import a pre-SQLite file store into the queue.")
+    p.set_defaults(fn=cmd_migrate)
+
+    p = sub.add_parser("serve", help="Node API: read-only HTTP + SSE over the store.")
+    p.add_argument("--port", type=int, default=DEFAULT_SERVE_PORT,
+                   help=f"Listen port (default {DEFAULT_SERVE_PORT}; 0 = ephemeral).")
+    p.add_argument("--bind", default="0.0.0.0")
+    p.add_argument("--no-mdns", action="store_true",
+                   help="Do not advertise via Bonjour (dns-sd).")
+    p.add_argument("--sse-poll", type=float, default=1.5,
+                   help="Seconds between event-table polls per SSE stream.")
+    p.set_defaults(fn=cmd_serve)
+
+    daemon_help = ("System LaunchDaemon instead of a user LaunchAgent — for "
+                   "headless machines with no GUI login. Requires sudo.")
+    p = sub.add_parser("install-launchd", help="Install + load the tick schedule.")
+    p.add_argument("--daemon", action="store_true", help=daemon_help)
+    p.set_defaults(fn=cmd_install_launchd)
+    p = sub.add_parser("uninstall-launchd", help="Unload + remove the tick schedule.")
+    p.add_argument("--daemon", action="store_true", help=daemon_help)
+    p.set_defaults(fn=cmd_uninstall_launchd)
+    p = sub.add_parser("install-serve-launchd",
+                       help="Install + load the node API server (KeepAlive).")
+    p.add_argument("--daemon", action="store_true", help=daemon_help)
+    p.set_defaults(fn=cmd_install_serve_launchd)
+    p = sub.add_parser("uninstall-serve-launchd",
+                       help="Unload + remove the node API server.")
+    p.add_argument("--daemon", action="store_true", help=daemon_help)
+    p.set_defaults(fn=cmd_uninstall_serve_launchd)
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    if args.cmd != "migrate" and (STORE / "registry.json").exists():
+        raise SystemExit(
+            f"legacy file store detected at {STORE} — run"
+            " `agentic-continuation migrate` first")
+    try:
+        return args.fn(args)
+    except SystemExit:
+        raise
+    except Exception as error:  # noqa: BLE001 — audit trail before dying
+        try:
+            conn = db()
+            event(conn, getattr(args, "cmd", "?"), args.actor,
+                  outcome="error", error=f"{type(error).__name__}: {error}")
+        except Exception:  # noqa: BLE001 — never mask the original failure
+            pass
+        raise
+
+
+if __name__ == "__main__":
+    sys.exit(main())

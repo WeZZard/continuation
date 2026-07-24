@@ -92,7 +92,7 @@ final class ServeHarness {
             .deletingLastPathComponent()   // Tests
             .deletingLastPathComponent()   // app
             .deletingLastPathComponent()   // repo root
-        repoBin = repoRoot.appendingPathComponent("bin/agentic-continuation").path
+        repoBin = repoRoot.appendingPathComponent("bin/continuation").path
         storeDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("continuations-kit-tests-\(UUID().uuidString)")
 

@@ -91,6 +91,39 @@ with the user first).
   is a coordinated migration (paths are load-bearing in CLAUDE.md, launchd
   plists, pi's package reference, the minis' mirror), deliberately not done.
 
+## Addendum: rename + distribution design (same day, later)
+
+- **CLI renamed `continuation`** (user's pick; collision research: npm's
+  `continuation` bin is a dead 2013 CPS compiler, PyPI/crates are
+  libraries, brew has nothing). `bin/continuation` is canonical;
+  `bin/agentic-continuation` stays as a tracked compat symlink because the
+  installed launchd plists on this Mac and the minis reference that path
+  (verified: both jobs alive post-rename). PATH carries both names.
+  Marketplace renamed too: the Claude wiring is now
+  `continuation@continuation` (old marketplace removed, cache rebuilt at
+  0.1.1); pi untouched (path unchanged, contents live, re-verified via
+  its own resource loader). Launchd labels and the store dir keep the
+  `agentic-continuation` name deliberately — they are installed system
+  identifiers, not the command.
+- Plugin/package bumped 0.1.1 (content changed after the repo went
+  public). Repo is now PUBLIC: github.com/WeZZard/continuation.
+- Skill: resolves `BIN="${CONTINUATION_BIN:-$(command -v continuation)}"`
+  (env override = dev-checkout escape hatch), description says macOS.
+- **Distribution design settled with the user (build NOT started):** the
+  app is the distribution vehicle and owns install/update with GUI
+  buttons — no CLI installer engine (user overruled that suggestion; the
+  wiring logic should live in a small shared Swift module so a future
+  App Store helper can reuse it). One release tag will version app + CLI
+  + plugin together; the app bundles the toolchain payload and
+  materializes it to a stable Application Support path; agents are wired
+  once by pointer registration. pi picks up content changes live;
+  Claude Code's cache is VERSION-KEYED, so updates flow only when the
+  materialized plugin version bumps (the app should nudge
+  `claude plugin update` after materializing). Debug/release split at
+  app-identity level only ("Continuation Debug", bundle id `.debug`):
+  never fork the skill name — dev skill text goes to project scope, dev
+  CLI/store via CONTINUATION_BIN / AGENTIC_CONTINUATION_STORE.
+
 ## Not done / open
 
 - **Not published to the wezzard-skills marketplace** — that catalog pins

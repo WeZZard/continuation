@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-BIN = str(Path(__file__).resolve().parent.parent / "bin" / "agentic-continuation")
+BIN = str(Path(__file__).resolve().parent.parent / "bin" / "continuation")
 
 FAKE_AGENT = """#!/usr/bin/env python3
 import json, os, sys

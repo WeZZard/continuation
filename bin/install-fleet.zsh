@@ -5,7 +5,7 @@
 # Expect one sudo password prompt per mini.
 set -e
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="$REPO/bin/agentic-continuation"
+BIN="$REPO/bin/continuation"
 
 echo "== this Mac: serve LaunchAgent =="
 pkill -f "agentic-continuation serve" 2>/dev/null || true
@@ -14,7 +14,7 @@ pkill -f "agentic-continuation serve" 2>/dev/null || true
 for ip in 192.168.50.4 192.168.50.5; do
   echo ""
   echo "== mini $ip: tick + serve LaunchDaemons (sudo password will be asked) =="
-  ssh -t wezzard@$ip 'P=$(~/.local/bin/uv python find); B=~/Artifacts/Repositories/com.github/WeZZard/agentic-continuation/bin/agentic-continuation; sudo "$P" "$B" install-launchd --daemon && sudo "$P" "$B" install-serve-launchd --daemon'
+  ssh -t wezzard@$ip 'P=$(~/.local/bin/uv python find); B=~/Artifacts/Repositories/com.github/WeZZard/agentic-continuation/bin/continuation; sudo "$P" "$B" install-launchd --daemon && sudo "$P" "$B" install-serve-launchd --daemon'
 done
 
 echo ""

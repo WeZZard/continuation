@@ -1,4 +1,4 @@
-# agentic-continuation
+# continuation
 
 A continuation-passing scheduler for agent tasks. Evaluating a task's
 continuation returns zero, one, or a tuple of continuations — like a function
@@ -45,8 +45,8 @@ returning functions — and this tool is the trampoline that consumes them.
 
 ```bash
 # Put the CLI on PATH once — plugins and skills resolve it from there.
-ln -sfn "$PWD/bin/agentic-continuation" ~/.local/bin/agentic-continuation
-BIN=agentic-continuation
+ln -sfn "$PWD/bin/continuation" ~/.local/bin/continuation
+BIN=continuation
 
 # Register a task from a continuation core (7-key JSON)
 $BIN register my-task --agent claude-code --single-run \
@@ -153,7 +153,7 @@ legacy top-`<CONTINUATION>` documents remain parseable.
 Interactive Claude Code and pi sessions hand new lines of work to this
 scheduler through the `continuation:schedule` skill
 (`plugins/continuation`): preflight the runtime, fetch the current grammar
-with `agentic-continuation authoring` (the skill deliberately carries no
+with `continuation authoring` (the skill deliberately carries no
 copy of it), draft the core, get the user's explicit approval, then
 register through the CLI with `--actor interactive-agent`. The CLI stays
 the single writer and `serve` stays read-only — dispatch is a local CLI
@@ -161,7 +161,8 @@ invocation, never an HTTP write. Sessions spawned BY the dispatcher
 (`AGENTIC_TASK_ID` in the environment) never use the skill; they return
 `<CONTINUATION>` blocks exactly as their document instructs.
 
-The skill locates the CLI with `command -v agentic-continuation` — the
+The skill locates the CLI with `command -v continuation` (overridable
+via `CONTINUATION_BIN` for development checkouts) — the
 CLI on PATH is the contract, so the plugin carries no machine paths and
 installs from any clone location (see Quick start for the one-time link).
 
@@ -170,7 +171,7 @@ The repo root doubles as a Claude Code plugin marketplace
 
 ```bash
 claude plugin marketplace add <repo-dir>
-claude plugin install continuation@agentic-continuation
+claude plugin install continuation@continuation
 ```
 
 The same directory is also a pi package (`package.json` carries the `pi`
@@ -182,5 +183,5 @@ pi install <repo-dir>/plugins/continuation
 
 Claude Code caches the installed plugin by version: after editing the
 skill, bump `plugins/continuation/.claude-plugin/plugin.json` and run
-`claude plugin update continuation@agentic-continuation`. pi references
+`claude plugin update continuation@continuation`. pi references
 local packages in place, so it tracks the repo live.

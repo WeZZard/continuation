@@ -1,24 +1,25 @@
 ---
 name: schedule
-description: Schedule work with the agentic-continuation scheduler on this machine. Use when work should happen later, on a schedule, or recur — nightly checks, polling until a condition holds, deferred follow-ups, multi-step lines of work that outlive this session — instead of waiting in-session or inventing bespoke launchd timers.
+description: Schedule work with the continuation scheduler on this Mac (macOS only). Use when work should happen later, on a schedule, or recur — nightly checks, polling until a condition holds, deferred follow-ups, multi-step lines of work that outlive this session — instead of waiting in-session or inventing bespoke launchd timers.
 ---
 
 # Schedule a continuation
 
-Hand a line of work to the agentic-continuation scheduler by registering a
+Hand a line of work to the continuation scheduler by registering a
 task whose continuation the dispatcher evaluates on its own schedule. Your
 whole job is to author a **continuation core** (a small JSON value) and pass
 it to the CLI — the CLI is the single writer of scheduler state. You never
 write anything under its store.
 
 ```bash
-BIN="$(command -v agentic-continuation)"
+BIN="${CONTINUATION_BIN:-$(command -v continuation)}"
 ```
 
-The CLI on PATH is the contract — the skill carries no machine paths. If
-`command -v` finds nothing, the tool is not installed here: stop and tell
-the user to clone the repo and link it, e.g.
-`ln -sfn "<repo>/bin/agentic-continuation" ~/.local/bin/agentic-continuation`.
+The CLI on PATH is the contract — the skill carries no machine paths, and
+`CONTINUATION_BIN` lets a development session point at a checkout without
+relinking. If neither resolves, the tool is not installed here: stop and
+tell the user to clone the repo and link it, e.g.
+`ln -sfn "<repo>/bin/continuation" ~/.local/bin/continuation`.
 
 ## When NOT to use this
 

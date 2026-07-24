@@ -1,13 +1,13 @@
 {
-  "name": "agentic-continuation",
-  "version": "0.1.0",
+  "name": "continuation",
+  "version": "0.1.1",
   "owner": {
     "name": "WeZZard"
   },
   "plugins": [
     {
       "name": "continuation",
-      "description": "Schedule continuations with the agentic-continuation scheduler: the continuation:schedule skill fetches the grammar from the CLI (`authoring`) and registers approved cores through the CLI — the single writer.",
+      "description": "Schedule continuations with the continuation scheduler: the continuation:schedule skill fetches the grammar from the CLI (`authoring`) and registers approved cores through the CLI — the single writer.",
       "source": "./plugins/continuation"
     }
   ]

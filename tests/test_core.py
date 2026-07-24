@@ -7,7 +7,7 @@ from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
 _loader = SourceFileLoader(
-    "ac", str(Path(__file__).resolve().parent.parent / "bin" / "agentic-continuation"))
+    "ac", str(Path(__file__).resolve().parent.parent / "bin" / "continuation"))
 _spec = importlib.util.spec_from_loader("ac", _loader)
 ac = importlib.util.module_from_spec(_spec)
 _loader.exec_module(ac)
@@ -174,7 +174,8 @@ def test_schedule_skill_carries_no_grammar_copy():
     assert '"schema_version"' not in skill     # no core shape copy
     assert '"mode"' not in skill               # no schedule grammar copy
     # The CLI on PATH is the contract; machine paths make it undistributable.
-    assert "command -v agentic-continuation" in skill
+    assert "command -v continuation" in skill
+    assert "CONTINUATION_BIN" in skill         # dev-checkout override
     assert "Artifacts/Repositories" not in skill
 
 
