@@ -2,18 +2,42 @@ import Foundation
 import XCTest
 @testable import ContinuationsKit
 
+/// The states of the agent-cell table, read from each agent's own records.
 final class InstallerTests: XCTestCase {
 
-    private let payload = URL(fileURLWithPath: "/Users/u/Library/Application Support/Continuation")
+    private func temporaryDirectory() -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("installer-test-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    private func claudeRecords(version: String) -> Data {
+        Data("""
+        {"version": 2, "plugins": {"continuation@continuation":
+          [{"scope": "user", "version": "\(version)"}]}}
+        """.utf8)
+    }
+
+    private func claudeSettings(marketplace: String, enabled: Bool? = true) -> Data {
+        let enabledPart = enabled.map {
+            #", "enabledPlugins": {"continuation@continuation": \#($0)}"#
+        } ?? ""
+        return Data("""
+        {"extraKnownMarketplaces": {"continuation": {"source":
+          {"source": "directory", "path": "\(marketplace)"}}}\(enabledPart)}
+        """.utf8)
+    }
+
+    // ----------------------------------------------------------- versions
 
     func testCLIVersionParsesFromScriptText() {
         let script = """
         SCHEMA_VERSION = 2
-        LABEL = "com.wezzard.agent.agentic-continuation"
-        VERSION = "0.3.0"
+        VERSION = "0.4.0"
         PROTO = "v1"
         """
-        XCTAssertEqual(InstallerFacts.cliVersion(inScript: script), "0.3.0")
+        XCTAssertEqual(InstallerFacts.cliVersion(inScript: script), "0.4.0")
         XCTAssertNil(InstallerFacts.cliVersion(inScript: "no version here"))
     }
 
@@ -22,157 +46,323 @@ final class InstallerTests: XCTestCase {
         XCTAssertEqual(InstallerFacts.pluginVersion(inPluginJSON: json), "0.1.1")
     }
 
-    func testClaudeWiringClassifiesDevCheckout() {
-        let settings = Data("""
-        {"extraKnownMarketplaces": {"continuation": {"source":
-          {"source": "directory", "path": "/Users/u/Artifacts/agentic-continuation"}}},
-         "enabledPlugins": {"continuation@continuation": true}}
-        """.utf8)
-        let wiring = InstallerFacts.claudeWiring(
-            settingsJSON: settings, payloadDir: payload,
-            cacheDir: URL(fileURLWithPath: "/nonexistent"))
-        XCTAssertEqual(wiring, .devCheckout(path: "/Users/u/Artifacts/agentic-continuation"))
+    // ------------------------------------------------------ Claude states
+
+    func testClaudeNotInstalledWhenNoRecords() {
+        let facts = InstallerFacts.claudeInstallation(
+            installedPluginsJSON: nil, settingsJSON: nil,
+            bundledPluginVersion: "0.1.1")
+        XCTAssertEqual(facts.installation, .notInstalled)
+        XCTAssertNil(facts.location)
     }
 
-    func testClaudeWiringClassifiesInstalledWithCacheVersion() throws {
-        let cache = FileManager.default.temporaryDirectory
-            .appendingPathComponent("installer-test-cache-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(
-            at: cache.appendingPathComponent("0.1.9"), withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(
-            at: cache.appendingPathComponent("0.1.10"), withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: cache) }
-
-        let settings = Data("""
-        {"extraKnownMarketplaces": {"continuation": {"source":
-          {"source": "directory", "path": "\(payload.path)"}}},
-         "enabledPlugins": {"continuation@continuation": true}}
-        """.utf8)
-        let wiring = InstallerFacts.claudeWiring(
-            settingsJSON: settings, payloadDir: payload, cacheDir: cache)
-        XCTAssertEqual(wiring, .installed(version: "0.1.10"))  // numeric sort
+    func testClaudeInstalledReportsVersionAndSource() {
+        let source = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: source) }
+        let facts = InstallerFacts.claudeInstallation(
+            installedPluginsJSON: claudeRecords(version: "0.1.1"),
+            settingsJSON: claudeSettings(marketplace: source.path),
+            bundledPluginVersion: "0.1.1")
+        XCTAssertEqual(facts.installation,
+                       .installed(version: "0.1.1", disabled: false,
+                                  updateAvailable: false))
+        XCTAssertEqual(facts.location, source.path)
     }
 
-    func testClaudeWiringNotInstalledWhenAbsentOrDisabled() {
-        XCTAssertEqual(
-            InstallerFacts.claudeWiring(settingsJSON: Data("{}".utf8),
-                                        payloadDir: payload,
-                                        cacheDir: URL(fileURLWithPath: "/x")),
-            .notInstalled)
-        let marketplaceOnly = Data("""
-        {"extraKnownMarketplaces": {"continuation": {"source":
-          {"source": "directory", "path": "\(payload.path)"}}}}
-        """.utf8)
-        XCTAssertEqual(
-            InstallerFacts.claudeWiring(settingsJSON: marketplaceOnly,
-                                        payloadDir: payload,
-                                        cacheDir: URL(fileURLWithPath: "/x")),
-            .notInstalled)
+    func testClaudeDisabledByTheAgentIsItsOwnState() {
+        let source = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: source) }
+        let facts = InstallerFacts.claudeInstallation(
+            installedPluginsJSON: claudeRecords(version: "0.1.1"),
+            settingsJSON: claudeSettings(marketplace: source.path, enabled: false),
+            bundledPluginVersion: "0.1.1")
+        XCTAssertEqual(facts.installation,
+                       .installed(version: "0.1.1", disabled: true,
+                                  updateAvailable: false))
     }
 
-    func testPiWiringResolvesRelativeEntriesAgainstAgentDir() {
-        let agentDir = URL(fileURLWithPath: "/Users/u/.pi/agent")
-        let settings = Data("""
-        {"packages": ["npm:pi-web-access",
-                      "../../Artifacts/agentic-continuation/plugins/continuation"]}
-        """.utf8)
-        let wiring = InstallerFacts.piWiring(
-            settingsJSON: settings, agentDir: agentDir, payloadDir: payload)
-        XCTAssertEqual(wiring,
-            .devCheckout(path: "/Users/u/Artifacts/agentic-continuation/plugins/continuation"))
+    func testClaudeUpdateAvailableWhenTheAppCarriesNewer() {
+        let source = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: source) }
+        let facts = InstallerFacts.claudeInstallation(
+            installedPluginsJSON: claudeRecords(version: "0.1.1"),
+            settingsJSON: claudeSettings(marketplace: source.path),
+            bundledPluginVersion: "0.2.0")
+        XCTAssertEqual(facts.installation,
+                       .installed(version: "0.1.1", disabled: false,
+                                  updateAvailable: true))
     }
 
-    func testPiWiringRecognizesPayloadInstall() {
-        let settings = Data("""
-        {"packages": ["\(payload.path)/plugins/continuation"]}
-        """.utf8)
-        let wiring = InstallerFacts.piWiring(
+    func testClaudeBrokenNamesItsCause() {
+        // Source registered, nothing installed.
+        let source = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: source) }
+        let halfway = InstallerFacts.claudeInstallation(
+            installedPluginsJSON: nil,
+            settingsJSON: claudeSettings(marketplace: source.path),
+            bundledPluginVersion: "0.1.1")
+        XCTAssertEqual(halfway.installation,
+                       .broken(cause: "source registered, plugin not installed"))
+
+        // Registered source that no longer exists on disk.
+        let missing = InstallerFacts.claudeInstallation(
+            installedPluginsJSON: claudeRecords(version: "0.1.1"),
+            settingsJSON: claudeSettings(marketplace: "/nonexistent/source"),
+            bundledPluginVersion: "0.1.1")
+        XCTAssertEqual(missing.installation, .broken(cause: "source missing"))
+        XCTAssertEqual(missing.location, "/nonexistent/source")
+
+        // Installed with no registered source at all.
+        let unregistered = InstallerFacts.claudeInstallation(
+            installedPluginsJSON: claudeRecords(version: "0.1.1"),
+            settingsJSON: Data("{}".utf8),
+            bundledPluginVersion: "0.1.1")
+        XCTAssertEqual(unregistered.installation,
+                       .broken(cause: "installed from an unregistered source"))
+    }
+
+    // ---------------------------------------------------------- pi states
+
+    private func piPackage(at root: URL, version: String) throws -> URL {
+        let path = root.appendingPathComponent("plugins/continuation")
+        try FileManager.default.createDirectory(at: path, withIntermediateDirectories: true)
+        try Data(#"{"name": "continuation", "version": "\#(version)"}"#.utf8)
+            .write(to: path.appendingPathComponent("package.json"))
+        return path
+    }
+
+    func testPiInstalledReadsTheLivePackage() throws {
+        let payload = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: payload) }
+        let package = try piPackage(at: payload, version: "0.1.1")
+        let settings = Data(#"{"packages": ["\#(package.path)"]}"#.utf8)
+
+        let facts = InstallerFacts.piInstallation(
             settingsJSON: settings,
             agentDir: URL(fileURLWithPath: "/Users/u/.pi/agent"),
-            payloadDir: payload)
-        XCTAssertEqual(wiring, .installed(version: nil))
+            payloadDir: payload, bundledPluginVersion: "0.1.1")
+        XCTAssertEqual(facts.installation,
+                       .installed(version: "0.1.1", disabled: false,
+                                  updateAvailable: false))
+        XCTAssertEqual(facts.location, package.path)
     }
 
-    func testPiWiringIgnoresRemoteSources() {
+    func testPiUpdateAvailableWhenPayloadIsBehindTheBundle() throws {
+        let payload = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: payload) }
+        let package = try piPackage(at: payload, version: "0.1.1")
+        let settings = Data(#"{"packages": ["\#(package.path)"]}"#.utf8)
+
+        let facts = InstallerFacts.piInstallation(
+            settingsJSON: settings,
+            agentDir: URL(fileURLWithPath: "/Users/u/.pi/agent"),
+            payloadDir: payload, bundledPluginVersion: "0.2.0")
+        XCTAssertEqual(facts.installation,
+                       .installed(version: "0.1.1", disabled: false,
+                                  updateAvailable: true))
+    }
+
+    func testPiDisabledWhenSkillsAreFilteredOff() throws {
+        let payload = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: payload) }
+        let package = try piPackage(at: payload, version: "0.1.1")
         let settings = Data("""
-        {"packages": ["npm:x", "https://github.com/a/b", "git@github.com:a/b.git"]}
+        {"packages": [{"source": "\(package.path)", "skills": []}]}
         """.utf8)
-        XCTAssertEqual(
-            InstallerFacts.piWiring(settingsJSON: settings,
-                                    agentDir: URL(fileURLWithPath: "/Users/u/.pi/agent"),
-                                    payloadDir: payload),
-            .notInstalled)
+        let facts = InstallerFacts.piInstallation(
+            settingsJSON: settings,
+            agentDir: URL(fileURLWithPath: "/Users/u/.pi/agent"),
+            payloadDir: payload, bundledPluginVersion: "0.1.1")
+        XCTAssertEqual(facts.installation,
+                       .installed(version: "0.1.1", disabled: true,
+                                  updateAvailable: false))
+    }
+
+    func testPiBrokenWhenSourceMissingAndNotInstalledWhenAbsent() {
+        let payload = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: payload) }
+        let settings = Data(#"{"packages": ["/nonexistent/plugins/continuation"]}"#.utf8)
+        let broken = InstallerFacts.piInstallation(
+            settingsJSON: settings,
+            agentDir: URL(fileURLWithPath: "/Users/u/.pi/agent"),
+            payloadDir: payload, bundledPluginVersion: "0.1.1")
+        XCTAssertEqual(broken.installation, .broken(cause: "source missing"))
+
+        let none = InstallerFacts.piInstallation(
+            settingsJSON: Data(#"{"packages": ["npm:other"]}"#.utf8),
+            agentDir: URL(fileURLWithPath: "/Users/u/.pi/agent"),
+            payloadDir: payload, bundledPluginVersion: "0.1.1")
+        XCTAssertEqual(none.installation, .notInstalled)
+    }
+
+    func testPiResolvesRelativeEntriesAgainstTheAgentDir() throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let agentDir = root.appendingPathComponent("agent")
+        try FileManager.default.createDirectory(at: agentDir, withIntermediateDirectories: true)
+        let package = try piPackage(at: root, version: "0.1.1")
+        let settings = Data(#"{"packages": ["../plugins/continuation"]}"#.utf8)
+
+        let facts = InstallerFacts.piInstallation(
+            settingsJSON: settings, agentDir: agentDir,
+            payloadDir: root, bundledPluginVersion: "0.1.1")
+        XCTAssertEqual(facts.location, package.path)
     }
 }
 
+// MARK: - Plans
+
 extension InstallerTests {
 
-    func testClaudeEnabledFlagParses() {
-        let on = Data(#"{"enabledPlugins": {"continuation@continuation": true}}"#.utf8)
-        let off = Data(#"{"enabledPlugins": {"continuation@continuation": false}}"#.utf8)
-        XCTAssertEqual(InstallerFacts.claudeEnabled(settingsJSON: on), true)
-        XCTAssertEqual(InstallerFacts.claudeEnabled(settingsJSON: off), false)
-        XCTAssertNil(InstallerFacts.claudeEnabled(settingsJSON: Data("{}".utf8)))
-    }
-
-    func testPiEnabledFlagParses() {
-        let agentDir = URL(fileURLWithPath: "/Users/u/.pi/agent")
-        let plain = Data(#"{"packages": ["/x/plugins/continuation"]}"#.utf8)
-        let disabled = Data(#"{"packages": [{"source": "/x/plugins/continuation", "skills": []}]}"#.utf8)
-        XCTAssertEqual(InstallerFacts.piEnabled(settingsJSON: plain, agentDir: agentDir), true)
-        XCTAssertEqual(InstallerFacts.piEnabled(settingsJSON: disabled, agentDir: agentDir), false)
-        XCTAssertNil(InstallerFacts.piEnabled(settingsJSON: Data("{}".utf8), agentDir: agentDir))
-    }
-
-    func testEngineTogglesBothSettingsFiles() throws {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("installer-toggle-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(
-            at: dir.appendingPathComponent("pi-agent"), withIntermediateDirectories: true)
-        let claudeSettings = dir.appendingPathComponent("claude-settings.json")
-        let piSettings = dir.appendingPathComponent("pi-agent/settings.json")
-        try Data(#"{"model": "fable", "enabledPlugins": {"continuation@continuation": true}}"#.utf8)
-            .write(to: claudeSettings)
-        try Data(#"{"packages": ["/x/plugins/continuation"]}"#.utf8).write(to: piSettings)
-        defer { try? FileManager.default.removeItem(at: dir) }
-
+    private func paths(payload: URL) -> InstallerEngine.Paths {
         var paths = InstallerEngine.Paths.standard()
-        paths.claudeSettings = claudeSettings
-        paths.piAgentDir = dir.appendingPathComponent("pi-agent")
-        let engine = InstallerEngine(paths: paths)
+        paths.payloadDest = payload
+        return paths
+    }
 
-        try engine.setClaudeEnabled(false)
-        XCTAssertEqual(
-            InstallerFacts.claudeEnabled(settingsJSON: try Data(contentsOf: claudeSettings)),
-            false)
-        // Unrelated keys survive the rewrite.
-        let root = try JSONSerialization.jsonObject(
-            with: Data(contentsOf: claudeSettings)) as? [String: Any]
-        XCTAssertEqual(root?["model"] as? String, "fable")
+    private func status(_ kind: AgentKind, _ installation: AgentInstallation,
+                        location: String?) -> AgentStatus {
+        AgentStatus(kind: kind, binaryPath: "/usr/local/bin/\(kind.command)",
+                    version: "1.0", installation: installation, location: location)
+    }
 
-        let agentDir = paths.piAgentDir
-        try engine.setPiEnabled(false)
-        XCTAssertEqual(
-            InstallerFacts.piEnabled(settingsJSON: try Data(contentsOf: piSettings),
-                                     agentDir: agentDir), false)
-        try engine.setPiEnabled(true)
-        XCTAssertEqual(
-            InstallerFacts.piEnabled(settingsJSON: try Data(contentsOf: piSettings),
-                                     agentDir: agentDir), true)
+    func testClaudeInstallRegistersThenInstalls() {
+        let payload = URL(fileURLWithPath: "/tmp/payload")
+        let plan = OperationPlanner.plan(
+            .install,
+            for: status(.claude, .notInstalled, location: nil),
+            paths: paths(payload: payload))
+        XCTAssertEqual(plan.steps.map(\.argv), [
+            ["claude", "plugin", "marketplace", "add", "/tmp/payload"],
+            ["claude", "plugin", "marketplace", "update", "continuation"],
+            ["claude", "plugin", "install", "continuation@continuation"],
+        ])
+        // The disclosure derives from the argument vector.
+        XCTAssertEqual(plan.steps[2].display,
+                       "claude plugin install continuation@continuation")
+    }
+
+    func testRetryConvergesWhenTheSourceIsAlreadyOurs() {
+        let payload = URL(fileURLWithPath: "/tmp/payload")
+        let plan = OperationPlanner.plan(
+            .retry,
+            for: status(.claude,
+                        .broken(cause: "source registered, plugin not installed"),
+                        location: "/tmp/payload"),
+            paths: paths(payload: payload))
+        // Converged: no add, but the listing is still re-read — Claude
+        // caches it, and a stale listing is what broke the first attempt.
+        XCTAssertEqual(plan.steps.map(\.argv), [
+            ["claude", "plugin", "marketplace", "update", "continuation"],
+            ["claude", "plugin", "install", "continuation@continuation"],
+        ])
+    }
+
+    func testRetryReplacesAStaleSource() {
+        let payload = URL(fileURLWithPath: "/tmp/payload")
+        let plan = OperationPlanner.plan(
+            .retry,
+            for: status(.claude, .broken(cause: "source missing"),
+                        location: "/gone/elsewhere"),
+            paths: paths(payload: payload))
+        XCTAssertEqual(plan.steps.map(\.argv.first),
+                       ["claude", "claude", "claude", "claude"])
+        XCTAssertEqual(plan.steps[0].argv[3], "remove")
+        XCTAssertEqual(plan.steps[1].argv[3], "add")
+        XCTAssertEqual(plan.steps[2].argv[3], "update")
+        XCTAssertEqual(plan.steps[3].argv[2], "install")
+    }
+
+    func testClaudeUninstallUnregistersOnlyWhatIsRegistered() {
+        let payload = URL(fileURLWithPath: "/tmp/payload")
+        let wired = OperationPlanner.plan(
+            .uninstall,
+            for: status(.claude,
+                        .installed(version: "0.1.1", disabled: false,
+                                   updateAvailable: false),
+                        location: "/tmp/payload"),
+            paths: paths(payload: payload))
+        XCTAssertEqual(wired.steps.count, 2)
+
+        let noSource = OperationPlanner.plan(
+            .uninstall,
+            for: status(.claude,
+                        .broken(cause: "installed from an unregistered source"),
+                        location: nil),
+            paths: paths(payload: payload))
+        XCTAssertEqual(noSource.steps.count, 1)
+    }
+
+    func testPiPlansInstallAndReplaceStale() {
+        let payload = URL(fileURLWithPath: "/tmp/payload")
+        let fresh = OperationPlanner.plan(
+            .install, for: status(.pi, .notInstalled, location: nil),
+            paths: paths(payload: payload))
+        XCTAssertEqual(fresh.steps.map(\.argv),
+                       [["pi", "install", "/tmp/payload/plugins/continuation"]])
+
+        let stale = OperationPlanner.plan(
+            .install,
+            for: status(.pi, .notInstalled, location: "/checkout/plugins/continuation"),
+            paths: paths(payload: payload))
+        XCTAssertEqual(stale.steps.map(\.argv), [
+            ["pi", "remove", "/checkout/plugins/continuation"],
+            ["pi", "install", "/tmp/payload/plugins/continuation"],
+        ])
+    }
+
+    func testUninstallNeedsNoPreparation() {
+        XCTAssertFalse(OperationVerb.uninstall.needsPreparation)
+        XCTAssertTrue(OperationVerb.install.needsPreparation)
+        XCTAssertTrue(OperationVerb.update.needsPreparation)
+        XCTAssertTrue(OperationVerb.retry.needsPreparation)
     }
 }
 
+// MARK: - Geometry, umbrellas, CLI link
+
 extension InstallerTests {
+
+    func testIconTakesTheGoldenShareOfTheCellInBothRegimes() {
+        // Text leads: the cell is text + padding, the icon follows.
+        let padding: CGFloat = 12
+        let tall = AgentCellGeometry.iconHeight(textHeight: 32,
+                                                verticalPadding: padding)
+        XCTAssertEqual(tall, 0.618 * (32 + padding), accuracy: 0.001)
+        XCTAssertEqual(tall / (32 + padding), 0.618, accuracy: 0.001)
+        XCTAssertLessThanOrEqual(tall, 32)
+
+        // Icon leads: its own fixed point, h = ratio * (h + padding).
+        let short = AgentCellGeometry.iconHeight(textHeight: 4,
+                                                 verticalPadding: padding)
+        XCTAssertEqual(short, short / (short + padding) * (short + padding),
+                       accuracy: 0.001)
+        XCTAssertEqual(short / (short + padding), 0.618, accuracy: 0.001)
+        XCTAssertGreaterThan(short, 4)
+    }
+
+    func testUmbrellaNamesSplitByBuild() {
+        XCTAssertEqual(AppSupportUmbrella.directoryName(
+            base: "Continuation",
+            bundleID: "com.wezzarddesign.continuation.debug"),
+            "Continuation-Debug")
+        XCTAssertEqual(AppSupportUmbrella.directoryName(
+            base: "Continuation",
+            bundleID: "com.wezzarddesign.continuations"),
+            "Continuation")
+        XCTAssertEqual(AppSupportUmbrella.directoryName(
+            base: "Continuations", bundleID: nil),
+            "Continuations")
+    }
 
     func testLinkAndUnlinkCLIRoundTrip() throws {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("installer-link-\(UUID().uuidString)")
+        let dir = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
         let payloadBin = dir.appendingPathComponent("payload/bin")
         try FileManager.default.createDirectory(at: payloadBin,
                                                 withIntermediateDirectories: true)
         try Data("#!/usr/bin/env python3\n".utf8)
             .write(to: payloadBin.appendingPathComponent("continuation"))
-        defer { try? FileManager.default.removeItem(at: dir) }
 
         var paths = InstallerEngine.Paths.standard()
         paths.payloadDest = dir.appendingPathComponent("payload")
@@ -188,22 +378,5 @@ extension InstallerTests {
         try engine.unlinkCLI()
         XCTAssertFalse(FileManager.default.fileExists(atPath: link.path))
         XCTAssertNoThrow(try engine.unlinkCLI())   // idempotent
-    }
-}
-
-extension InstallerTests {
-
-    func testUmbrellaNamesSplitByBuild() {
-        XCTAssertEqual(AppSupportUmbrella.directoryName(
-            base: "Continuation",
-            bundleID: "com.wezzarddesign.continuation.debug"),
-            "Continuation-Debug")
-        XCTAssertEqual(AppSupportUmbrella.directoryName(
-            base: "Continuation",
-            bundleID: "com.wezzarddesign.continuations"),
-            "Continuation")
-        XCTAssertEqual(AppSupportUmbrella.directoryName(
-            base: "Continuations", bundleID: nil),
-            "Continuations")
     }
 }

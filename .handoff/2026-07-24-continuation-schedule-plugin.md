@@ -239,6 +239,40 @@ with the user first).
   The CLI PATH link (~/.local/bin/continuation → repo bin) remains —
   it is not a plugin and has its own CLI-panel Uninstall.
 
+## Addendum: agent plugin management follows the UX scene (2026-07-25)
+
+- Built to `systems/ux/scenes/agent-plugin-management/` (three docs:
+  scene, agent-cell, operation-sheet). The scene is the authority now —
+  read it before changing this surface.
+- Fact layer rewritten around the cell's SIX states, read from each
+  agent's own records every time: installed / installed-disabled /
+  update-available / not-installed / broken(named cause) / absent.
+  Claude's truth is `installed_plugins.json` (settings.json alone never
+  installs — reproved: an install that half-failed left settings looking
+  installed while Claude reported nothing). pi's truth is its package
+  entry, read live from the payload.
+- Operation sheet built: nothing runs from the cell, every command is
+  disclosed BEFORE it runs and the disclosure list becomes the progress
+  list; the argv is the step and the display derives from it; a failure
+  keeps the tool's own stderr on its own line with later steps skipped;
+  retry re-plans from fresh facts (converged list); no mid-run exit;
+  success waits for Done. Preparation (materialize + PATH link) is not a
+  disclosed command and fails before anything runs.
+- Cell: agent's own mark at 0.618 of cell height, vertically centered,
+  solved in closed form (two regimes, no measure-and-resize loop);
+  name + (agent-reported version); three-facade indicator (status →
+  location → copy/Copied → status) that copies the FULL location even
+  when the display abbreviates; the action button is the only control.
+- **The sheet caught a real bug on its first live run**: Claude Code
+  keeps its own copy of a marketplace's listing and it OUTLIVES an
+  unregister, so `marketplace add` followed immediately by `install`
+  fails with "Plugin not found in marketplace". The plan now always
+  re-reads the listing (`claude plugin marketplace update continuation`)
+  between add and install. Live-verified through the app afterwards:
+  Claude's install record shows continuation@continuation 0.1.1 from the
+  debug umbrella, `claude plugin list` reports it enabled.
+- Swift tests 23 → 31 (states, plans incl. convergence, geometry regimes).
+
 ## Not done / open
 
 - **Not published to the wezzard-skills marketplace** — that catalog pins

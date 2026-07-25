@@ -2,15 +2,14 @@ import Foundation
 
 // The app's payload — the `continuation` command-line tool plus the agent
 // plugin, nothing else — is embedded at Resources/payload and materialized
-// to ~/Library/Application Support/Continuation/. This module is the single
-// home of the install/update wiring so a future App Store helper can reuse
-// it. The split: reads come from the agents' state files; install/uninstall/
-// update go through the agents' own CLIs (their internal state — caches,
-// installed_plugins.json — is theirs alone to write); the enabled flag is
-// documented user configuration in each agent's settings.json, which the
-// app edits directly like any settings GUI. A wiring that points anywhere
-// other than the materialized payload is a development checkout: the app
-// changes it only on an explicit button press, never automatically.
+// to the build's own Application Support umbrella. This module is the
+// single home of the install wiring so a future App Store helper can reuse
+// it.
+//
+// Per the agent-plugin-management scene: the agent's OWN records are the
+// truth — installation status is read from them every time, never
+// remembered here — and every change goes through the agent's native
+// plugin system, never by writing into files the user authored.
 
 /// Debug and release builds keep separate Application Support umbrellas
 /// (user ruling 2026-07-25): a debug app never writes into the release
@@ -24,28 +23,55 @@ public enum AppSupportUmbrella {
     }
 }
 
-public enum PluginWiring: Equatable, Sendable {
-    case agentMissing
-    case notInstalled
-    case installed(version: String?)   // wired to the app's payload
-    case devCheckout(path: String)     // wired elsewhere — left alone
+public enum AgentKind: String, Sendable, CaseIterable, Identifiable, Codable {
+    case claude
+    case pi
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .claude: return "Claude Code"
+        case .pi: return "pi"
+        }
+    }
+
+    /// The command the agent's own plugin system is driven through.
+    public var command: String {
+        switch self {
+        case .claude: return "claude"
+        case .pi: return "pi"
+        }
+    }
 }
 
-public struct AgentStatus: Equatable, Sendable {
-    public let binaryPath: String?
-    public let binaryVersion: String?
-    public let wiring: PluginWiring
-    /// The agent-native enable flag; nil when the agent has no entry.
-    public let enabled: Bool?
+/// The states of the cell's table, read from the agent every time.
+public enum AgentInstallation: Equatable, Sendable {
+    case absent                        // no usable agent on this Mac
+    case notInstalled
+    case installed(version: String?, disabled: Bool, updateAvailable: Bool)
+    case broken(cause: String)
+}
 
+public struct AgentStatus: Equatable, Sendable, Identifiable {
+    public let kind: AgentKind
+    public let binaryPath: String?
+    /// The version the agent itself reports; nil when none was found.
+    public let version: String?
+    public let installation: AgentInstallation
+    /// Where the agent installs the plugin FROM.
+    public let location: String?
+
+    public var id: AgentKind { kind }
     public var detected: Bool { binaryPath != nil }
 
-    public init(binaryPath: String?, binaryVersion: String?, wiring: PluginWiring,
-                enabled: Bool? = nil) {
+    public init(kind: AgentKind, binaryPath: String?, version: String?,
+                installation: AgentInstallation, location: String?) {
+        self.kind = kind
         self.binaryPath = binaryPath
-        self.binaryVersion = binaryVersion
-        self.wiring = wiring
-        self.enabled = enabled
+        self.version = version
+        self.installation = installation
+        self.location = location
     }
 }
 
@@ -56,26 +82,31 @@ public struct InstallerSnapshot: Equatable, Sendable {
     public let installedPluginVersion: String?
     public let payloadDir: String
     public let cliOnPath: String?
-    public let claude: AgentStatus
-    public let pi: AgentStatus
+    public let agents: [AgentStatus]
+
+    public func agent(_ kind: AgentKind) -> AgentStatus? {
+        agents.first { $0.kind == kind }
+    }
 
     public init(bundledCLIVersion: String?, bundledPluginVersion: String?,
                 installedCLIVersion: String?, installedPluginVersion: String?,
-                payloadDir: String, cliOnPath: String?,
-                claude: AgentStatus, pi: AgentStatus) {
+                payloadDir: String, cliOnPath: String?, agents: [AgentStatus]) {
         self.bundledCLIVersion = bundledCLIVersion
         self.bundledPluginVersion = bundledPluginVersion
         self.installedCLIVersion = installedCLIVersion
         self.installedPluginVersion = installedPluginVersion
         self.payloadDir = payloadDir
         self.cliOnPath = cliOnPath
-        self.claude = claude
-        self.pi = pi
+        self.agents = agents
     }
 }
 
-/// Pure classifiers over the facts on disk — testable without a live system.
+/// Pure classifiers over the agents' own records — testable without a
+/// live system.
 public enum InstallerFacts {
+
+    public static let pluginID = "continuation@continuation"
+    public static let marketplaceName = "continuation"
 
     /// The CLI's version constant, read from the script text itself: the
     /// tool has no dependency on being runnable to be inspectable.
@@ -90,72 +121,100 @@ public enum InstallerFacts {
         return (parsed as? [String: Any])?["version"] as? String
     }
 
-    /// Claude Code wiring, judged from ~/.claude/settings.json: the
-    /// `continuation` marketplace entry names a directory; ours or a
-    /// checkout. The installed version is the newest version-keyed cache
-    /// directory (Claude copies plugins; content is not live).
-    public static func claudeWiring(settingsJSON: Data?, payloadDir: URL,
-                                    cacheDir: URL,
-                                    fileManager: FileManager = .default) -> PluginWiring {
-        guard let data = settingsJSON,
-              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        else { return .notInstalled }
-        let marketplaces = root["extraKnownMarketplaces"] as? [String: Any]
-        guard let entry = marketplaces?["continuation"] as? [String: Any],
-              let source = entry["source"] as? [String: Any],
-              let path = source["path"] as? String else { return .notInstalled }
-        if URL(fileURLWithPath: path).standardizedFileURL.path
-            != payloadDir.standardizedFileURL.path {
-            return .devCheckout(path: path)
-        }
-        let enabled = (root["enabledPlugins"] as? [String: Any])?
-            .keys.contains("continuation@continuation") ?? false
-        guard enabled else { return .notInstalled }
-        let versions = (try? fileManager.contentsOfDirectory(atPath: cacheDir.path))?
-            .filter { !$0.hasPrefix(".") }
-            .sorted { $0.compare($1, options: .numeric) == .orderedAscending }
-        return .installed(version: versions?.last)
+    /// Claude Code's own install record: `~/.claude/plugins/installed_plugins.json`
+    /// is what `claude plugin list` reports from — settings.json alone
+    /// never installs anything (probed 2026-07-25).
+    public static func claudeInstalledVersion(installedPluginsJSON: Data?) -> String? {
+        guard let data = installedPluginsJSON,
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let plugins = root["plugins"] as? [String: Any],
+              let records = plugins[pluginID] as? [Any],
+              let record = records.first as? [String: Any] else { return nil }
+        return (record["version"] as? String) ?? ""
     }
 
-    /// pi wiring, judged from ~/.pi/agent/settings.json: local packages are
-    /// path entries (absolute, relative to the agent dir, or "local:"-
-    /// prefixed) referenced in place — content is live, so no version.
-    public static func piWiring(settingsJSON: Data?, agentDir: URL,
-                                payloadDir: URL) -> PluginWiring {
+    /// The registered marketplace directory — where Claude Code installs
+    /// the plugin FROM.
+    public static func claudeMarketplacePath(settingsJSON: Data?) -> String? {
         guard let data = settingsJSON,
               let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let packages = root["packages"] as? [Any],
-              let entry = piContinuationEntry(packages: packages, agentDir: agentDir)
-        else { return .notInstalled }
-        let ours = payloadDir.appendingPathComponent("plugins/continuation")
-            .standardizedFileURL.path
-        return entry.path == ours
-            ? .installed(version: nil)
-            : .devCheckout(path: entry.path)
+              let marketplaces = root["extraKnownMarketplaces"] as? [String: Any],
+              let entry = marketplaces[marketplaceName] as? [String: Any],
+              let source = entry["source"] as? [String: Any] else { return nil }
+        return source["path"] as? String
     }
 
-    /// The Claude enable flag: the value under `enabledPlugins`, a
-    /// documented settings.json key. nil = no entry.
+    /// The agent's own enable flag; nil when it holds no opinion.
     public static func claudeEnabled(settingsJSON: Data?) -> Bool? {
         guard let data = settingsJSON,
               let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let plugins = root["enabledPlugins"] as? [String: Any] else { return nil }
-        return plugins["continuation@continuation"] as? Bool
+        return plugins[pluginID] as? Bool
     }
 
-    /// The pi enable flag: a package entry may be an object carrying
-    /// per-resource patterns, and `"skills": []` disables every skill the
-    /// package provides (what `pi config` itself writes). A plain string
-    /// entry is fully enabled. nil = no entry.
-    public static func piEnabled(settingsJSON: Data?, agentDir: URL) -> Bool? {
+    public static func claudeInstallation(
+        installedPluginsJSON: Data?, settingsJSON: Data?,
+        bundledPluginVersion: String?,
+        fileManager: FileManager = .default
+    ) -> (installation: AgentInstallation, location: String?) {
+        let marketplace = claudeMarketplacePath(settingsJSON: settingsJSON)
+        let installed = claudeInstalledVersion(installedPluginsJSON: installedPluginsJSON)
+
+        guard let installed else {
+            // A registered source with nothing installed is a half state —
+            // named, and repaired by the cell's action.
+            if marketplace != nil {
+                return (.broken(cause: "source registered, plugin not installed"),
+                        marketplace)
+            }
+            return (.notInstalled, nil)
+        }
+        guard let marketplace else {
+            return (.broken(cause: "installed from an unregistered source"), nil)
+        }
+        guard fileManager.fileExists(atPath: marketplace) else {
+            return (.broken(cause: "source missing"), marketplace)
+        }
+        let disabled = claudeEnabled(settingsJSON: settingsJSON) == false
+        let stale = bundledPluginVersion.map { !installed.isEmpty && installed != $0 }
+            ?? false
+        return (.installed(version: installed.isEmpty ? nil : installed,
+                           disabled: disabled, updateAvailable: stale),
+                marketplace)
+    }
+
+    /// pi installs from a local package path referenced IN PLACE, so its
+    /// version is whatever that directory holds right now.
+    public static func piInstallation(
+        settingsJSON: Data?, agentDir: URL, payloadDir: URL,
+        bundledPluginVersion: String?,
+        fileManager: FileManager = .default
+    ) -> (installation: AgentInstallation, location: String?) {
         guard let data = settingsJSON,
               let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let packages = root["packages"] as? [Any],
               let entry = piContinuationEntry(packages: packages, agentDir: agentDir)
-        else { return nil }
-        guard let object = entry.raw as? [String: Any],
-              let skills = object["skills"] as? [Any] else { return true }
-        return !skills.isEmpty
+        else { return (.notInstalled, nil) }
+
+        guard fileManager.fileExists(atPath: entry.path) else {
+            return (.broken(cause: "source missing"), entry.path)
+        }
+        let disabled: Bool = {
+            guard let object = entry.raw as? [String: Any],
+                  let skills = object["skills"] as? [Any] else { return false }
+            return skills.isEmpty
+        }()
+        let version = (try? Data(contentsOf: URL(fileURLWithPath: entry.path)
+            .appendingPathComponent("package.json")))
+            .flatMap(pluginVersion(inPluginJSON:))
+        // The package is read live; it is stale only when the app's own
+        // payload has not been refreshed to the bundled version.
+        let ours = entry.path == payloadDir
+            .appendingPathComponent("plugins/continuation").standardizedFileURL.path
+        let stale = ours && bundledPluginVersion != nil && version != bundledPluginVersion
+        return (.installed(version: version, disabled: disabled,
+                           updateAvailable: stale),
+                entry.path)
     }
 
     /// The continuation package entry in a pi `packages` array, with its
@@ -194,9 +253,9 @@ public final class InstallerEngine {
 
     public struct Paths {
         public var payloadSource: URL?      // Resources/payload in the bundle
-        public var payloadDest: URL         // ~/Library/App Support/Continuation
+        public var payloadDest: URL         // the build's App Support umbrella
         public var claudeSettings: URL
-        public var claudeCache: URL         // …/plugins/cache/continuation/continuation
+        public var claudeInstalledPlugins: URL
         public var piAgentDir: URL
         public var localBin: URL
 
@@ -213,10 +272,14 @@ public final class InstallerEngine {
                         bundleID: bundle.bundleIdentifier),
                     isDirectory: true),
                 claudeSettings: home.appendingPathComponent(".claude/settings.json"),
-                claudeCache: home.appendingPathComponent(
-                    ".claude/plugins/cache/continuation/continuation", isDirectory: true),
+                claudeInstalledPlugins: home.appendingPathComponent(
+                    ".claude/plugins/installed_plugins.json"),
                 piAgentDir: home.appendingPathComponent(".pi/agent", isDirectory: true),
                 localBin: home.appendingPathComponent(".local/bin", isDirectory: true))
+        }
+
+        public var pluginSource: URL {
+            payloadDest.appendingPathComponent("plugins/continuation")
         }
     }
 
@@ -229,6 +292,8 @@ public final class InstallerEngine {
 
     // ------------------------------------------------------------- reading
 
+    /// Detection is cheap and runs often; the agent's records are files,
+    /// so status costs one `--version` subprocess per detected agent.
     public func snapshot() -> InstallerSnapshot {
         let fm = FileManager.default
         let bundledCLI = (paths.payloadSource?
@@ -247,22 +312,18 @@ public final class InstallerEngine {
             .appendingPathComponent("plugins/continuation/.claude-plugin/plugin.json")))
             .flatMap(InstallerFacts.pluginVersion(inPluginJSON:))
 
-        let claudeBinary = which("claude") ?? firstExisting([
-            "~/.claude/local/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"])
-        let piBinary = which("pi") ?? firstExisting([
-            "/opt/homebrew/bin/pi", "/usr/local/bin/pi"])
-        let claudeSettings = try? Data(contentsOf: paths.claudeSettings)
-        let piSettings = try? Data(contentsOf:
-            paths.piAgentDir.appendingPathComponent("settings.json"))
+        let claudeBinary = locate(.claude)
+        let piBinary = locate(.pi)
 
-        var claudeWiring = InstallerFacts.claudeWiring(
-            settingsJSON: claudeSettings, payloadDir: paths.payloadDest,
-            cacheDir: paths.claudeCache, fileManager: fm)
-        if claudeBinary == nil { claudeWiring = .agentMissing }
-        var piWiring = InstallerFacts.piWiring(
-            settingsJSON: piSettings, agentDir: paths.piAgentDir,
-            payloadDir: paths.payloadDest)
-        if piBinary == nil { piWiring = .agentMissing }
+        let claudeFacts = InstallerFacts.claudeInstallation(
+            installedPluginsJSON: try? Data(contentsOf: paths.claudeInstalledPlugins),
+            settingsJSON: try? Data(contentsOf: paths.claudeSettings),
+            bundledPluginVersion: bundledPlugin, fileManager: fm)
+        let piFacts = InstallerFacts.piInstallation(
+            settingsJSON: try? Data(contentsOf:
+                paths.piAgentDir.appendingPathComponent("settings.json")),
+            agentDir: paths.piAgentDir, payloadDir: paths.payloadDest,
+            bundledPluginVersion: bundledPlugin, fileManager: fm)
 
         return InstallerSnapshot(
             bundledCLIVersion: bundledCLI,
@@ -271,20 +332,39 @@ public final class InstallerEngine {
             installedPluginVersion: installedPlugin,
             payloadDir: paths.payloadDest.path,
             cliOnPath: which("continuation"),
-            claude: AgentStatus(
-                binaryPath: claudeBinary,
-                binaryVersion: claudeBinary.flatMap { toolVersion($0) },
-                wiring: claudeWiring,
-                enabled: InstallerFacts.claudeEnabled(settingsJSON: claudeSettings)),
-            pi: AgentStatus(
-                binaryPath: piBinary,
-                binaryVersion: piBinary.flatMap { toolVersion($0) },
-                wiring: piWiring,
-                enabled: InstallerFacts.piEnabled(settingsJSON: piSettings,
-                                                  agentDir: paths.piAgentDir)))
+            agents: [
+                AgentStatus(kind: .claude, binaryPath: claudeBinary,
+                            version: claudeBinary.flatMap { toolVersion($0) },
+                            installation: claudeBinary == nil
+                                ? .absent : claudeFacts.installation,
+                            location: claudeFacts.location),
+                AgentStatus(kind: .pi, binaryPath: piBinary,
+                            version: piBinary.flatMap { toolVersion($0) },
+                            installation: piBinary == nil
+                                ? .absent : piFacts.installation,
+                            location: piFacts.location),
+            ])
     }
 
-    // ------------------------------------------------------------- actions
+    public func locate(_ agent: AgentKind) -> String? {
+        if let found = which(agent.command) { return found }
+        switch agent {
+        case .claude:
+            return firstExisting(["~/.claude/local/claude",
+                                  "/opt/homebrew/bin/claude", "/usr/local/bin/claude"])
+        case .pi:
+            return firstExisting(["/opt/homebrew/bin/pi", "/usr/local/bin/pi"])
+        }
+    }
+
+    // -------------------------------------------------------- preparation
+
+    /// Work the app performs inside its own container: never a disclosed
+    /// command, and it fails before the sheet runs anything.
+    public func prepare() throws {
+        try materialize()
+        try linkCLI()
+    }
 
     /// Copy the bundled payload into place atomically: build aside, swap.
     public func materialize() throws {
@@ -324,27 +404,6 @@ public final class InstallerEngine {
         note("linked \(link.path)")
     }
 
-    @discardableResult
-    public func wireClaude() -> Bool {
-        // `marketplace add` is refused when the name is already registered;
-        // that is fine — install still resolves through the existing entry
-        // (a dev entry never reaches here: callers guard on wiring state).
-        _ = shell("claude plugin marketplace add '\(paths.payloadDest.path)'")
-        return shell("claude plugin install continuation@continuation").status == 0
-    }
-
-    @discardableResult
-    public func updateClaude() -> Bool {
-        shell("claude plugin update continuation@continuation").status == 0
-    }
-
-    @discardableResult
-    public func unwireClaude() -> Bool {
-        let ok = shell("claude plugin uninstall continuation@continuation").status == 0
-        _ = shell("claude plugin marketplace remove continuation")
-        return ok
-    }
-
     public func unlinkCLI() throws {
         let link = paths.localBin.appendingPathComponent("continuation")
         do {
@@ -355,61 +414,35 @@ public final class InstallerEngine {
         }
     }
 
-    /// Flip the documented `enabledPlugins` flag in Claude's settings.json.
-    /// JSONSerialization rewrites the file sorted — the same treatment
-    /// `claude plugin install` already gives it.
-    public func setClaudeEnabled(_ on: Bool) throws {
-        let url = paths.claudeSettings
-        var root = (try? JSONSerialization.jsonObject(
-            with: Data(contentsOf: url))) as? [String: Any] ?? [:]
-        var plugins = root["enabledPlugins"] as? [String: Any] ?? [:]
-        plugins["continuation@continuation"] = on
-        root["enabledPlugins"] = plugins
-        try JSONSerialization.data(withJSONObject: root,
-                                   options: [.prettyPrinted, .sortedKeys])
-            .write(to: url, options: .atomic)
-        note("claude enabledPlugins[continuation@continuation] → \(on)")
-    }
+    // ------------------------------------------------------------- running
 
-    /// Flip the pi package's skills on or off: `"skills": []` on the
-    /// package entry disables them (pi's own config format); a plain
-    /// string entry enables everything.
-    public func setPiEnabled(_ on: Bool) throws {
-        let url = paths.piAgentDir.appendingPathComponent("settings.json")
-        var root = (try? JSONSerialization.jsonObject(
-            with: Data(contentsOf: url))) as? [String: Any] ?? [:]
-        var packages = root["packages"] as? [Any] ?? []
-        guard let entry = InstallerFacts.piContinuationEntry(
-            packages: packages, agentDir: paths.piAgentDir) else {
-            note("pi: no continuation package entry to toggle")
-            return
-        }
-        var source = entry.raw as? String
-        if source == nil, let object = entry.raw as? [String: Any] {
-            source = object["source"] as? String
-        }
-        guard let source else { return }
-        packages[entry.index] = on ? source : ["source": source, "skills": [Any]()]
-        root["packages"] = packages
-        try JSONSerialization.data(withJSONObject: root,
-                                   options: [.prettyPrinted, .sortedKeys])
-            .write(to: url, options: .atomic)
-        note("pi package skills → \(on ? "enabled" : "disabled")")
-    }
-
+    /// Run one disclosed step verbatim: the argument vector IS the step.
+    /// Returns the tool's own exit status and its full standard error.
     @discardableResult
-    public func wirePi() -> Bool {
-        shell("pi install '\(paths.payloadDest.appendingPathComponent("plugins/continuation").path)'")
-            .status == 0
-    }
-
-    /// Remove the pi package by its actual wired path — the payload copy
-    /// or a development checkout; the caller passes what the snapshot saw.
-    @discardableResult
-    public func unwirePi(sourcePath: String? = nil) -> Bool {
-        let path = sourcePath
-            ?? paths.payloadDest.appendingPathComponent("plugins/continuation").path
-        return shell("pi remove '\(path)'").status == 0
+    public func run(argv: [String]) -> (status: Int32, stderr: String, stdout: String) {
+        guard let first = argv.first else { return (0, "", "") }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = argv
+        var environment = ProcessInfo.processInfo.environment
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let extra = "\(home)/.local/bin:/opt/homebrew/bin:/usr/local/bin"
+        environment["PATH"] = extra + ":" + (environment["PATH"] ?? "/usr/bin:/bin")
+        process.environment = environment
+        let out = Pipe(), err = Pipe()
+        process.standardOutput = out
+        process.standardError = err
+        do { try process.run() } catch {
+            note("$ \(argv.joined(separator: " "))\n\(error.localizedDescription)")
+            return (127, "could not run \(first): \(error.localizedDescription)", "")
+        }
+        let outData = out.fileHandleForReading.readDataToEndOfFile()
+        let errData = err.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let stdout = String(decoding: outData, as: UTF8.self)
+        let stderr = String(decoding: errData, as: UTF8.self)
+        note("$ \(argv.joined(separator: " ")) → \(process.terminationStatus)")
+        return (process.terminationStatus, stderr, stdout)
     }
 
     // ------------------------------------------------------------- helpers
@@ -421,33 +454,9 @@ public final class InstallerEngine {
         }
     }
 
-    /// GUI apps get launchd's minimal PATH; agent CLIs live in user PATH
-    /// territory, so every shell-out runs with the usual locations added.
-    @discardableResult
-    public func shell(_ command: String) -> (status: Int32, output: String) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-c", """
-            export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
-            \(command)
-            """]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        do { try process.run() } catch {
-            note("$ \(command)\nfailed to launch: \(error.localizedDescription)")
-            return (127, error.localizedDescription)
-        }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        let output = String(data: data, encoding: .utf8) ?? ""
-        note("$ \(command)\n\(output.trimmingCharacters(in: .whitespacesAndNewlines))")
-        return (process.terminationStatus, output)
-    }
-
     private func which(_ name: String) -> String? {
-        let result = shell("command -v \(name)")
-        let path = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let result = run(argv: ["/bin/zsh", "-lc", "command -v \(name)"])
+        let path = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
             .components(separatedBy: "\n").last ?? ""
         return result.status == 0 && path.hasPrefix("/") ? path : nil
     }
@@ -459,9 +468,15 @@ public final class InstallerEngine {
     }
 
     private func toolVersion(_ binary: String) -> String? {
-        let result = shell("'\(binary)' --version 2>/dev/null | head -1")
-        let line = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
-        return result.status == 0 && !line.isEmpty ? line : nil
+        let result = run(argv: [binary, "--version"])
+        let line = result.stdout
+            .components(separatedBy: "\n")
+            .first { !$0.trimmingCharacters(in: .whitespaces).isEmpty } ?? ""
+        guard result.status == 0 else { return nil }
+        // "2.1.220 (Claude Code)" → "2.1.220"
+        let head = line.trimmingCharacters(in: .whitespaces)
+            .components(separatedBy: " ").first ?? ""
+        return head.isEmpty ? nil : head
     }
 
     private func note(_ line: String) {

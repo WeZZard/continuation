@@ -79,17 +79,20 @@ final class InstallerModel: ObservableObject {
     @Published var snapshot: InstallerSnapshot?
     @Published var busy = false
     @Published var lastError: String?
-    @Published var showLog = false
+    /// A background synchronization failure — reported on the section's
+    /// status line, with the cell's action left as the recovery.
+    @Published var syncFailure: String?
 
     let engine = InstallerEngine()
 
-    var transcript: String { engine.transcript }
-
-    func refresh() {
+    /// Status costs a subprocess per agent: on appearance, after any
+    /// operation, and on a slower cadence.
+    func refresh(syncing: Bool = false) {
         let engine = self.engine
         Task.detached(priority: .userInitiated) { [weak self] in
             let snap = engine.snapshot()
             await self?.apply(snapshot: snap)
+            if syncing { await self?.synchronizeInBackground(snap) }
         }
     }
 
@@ -102,8 +105,51 @@ final class InstallerModel: ObservableObject {
         }
     }
 
-    /// Every mutation follows the same shape: run on a background task,
-    /// re-snapshot, surface the first failure line.
+    /// An app update carrying a newer plugin runs WITHOUT the sheet and
+    /// reports its failure on the status line.
+    private func synchronizeInBackground(_ snap: InstallerSnapshot) {
+        let stale = snap.agents.filter {
+            if case .installed(_, _, let update) = $0.installation { return update }
+            return false
+        }
+        guard !stale.isEmpty else { return }
+        let engine = self.engine
+        Task.detached(priority: .utility) { [weak self] in
+            var failures: [String] = []
+            do {
+                try engine.prepare()
+            } catch {
+                await self?.report(sync: error.localizedDescription)
+                return
+            }
+            for agent in stale {
+                let plan = OperationPlanner.plan(.update, for: agent,
+                                                 paths: engine.paths)
+                for step in plan.steps {
+                    let result = engine.run(argv: step.argv)
+                    if result.status != 0 {
+                        let text = result.stderr
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        failures.append("\(agent.kind.displayName): "
+                            + (text.isEmpty ? "`\(step.display)` failed" : text))
+                        break
+                    }
+                }
+            }
+            let refreshed = engine.snapshot()
+            await self?.apply(snapshot: refreshed)
+            await self?.report(sync: failures.isEmpty
+                ? nil
+                : "Could not update the installed plugin — " + failures.joined(separator: "; "))
+        }
+    }
+
+    private func report(sync failure: String?) {
+        syncFailure = failure
+    }
+
+    /// The CLI panel's own button; the agents' plugins go through the
+    /// operation sheet instead.
     private func perform(_ label: String,
                          _ work: @escaping (InstallerEngine) throws -> Bool) {
         guard !busy else { return }
@@ -113,7 +159,7 @@ final class InstallerModel: ObservableObject {
         Task.detached(priority: .userInitiated) { [weak self] in
             let failure: String?
             do {
-                failure = try work(engine) ? nil : "\(label) failed — see the log."
+                failure = try work(engine) ? nil : "\(label) failed."
             } catch {
                 failure = error.localizedDescription
             }
@@ -122,36 +168,9 @@ final class InstallerModel: ObservableObject {
         }
     }
 
-    func installClaude() {
-        perform("Install") { engine in
-            try engine.materialize()
-            try engine.linkCLI()
-            return engine.wireClaude()
-        }
-    }
-
-    func installPi() {
-        perform("Install") { engine in
-            try engine.materialize()
-            try engine.linkCLI()
-            return engine.wirePi()
-        }
-    }
-
-    func uninstallClaude() { perform("Uninstall") { $0.unwireClaude() } }
-
-    func uninstallPi() {
-        let wiredPath: String? = {
-            if case .devCheckout(let path) = snapshot?.pi.wiring { return path }
-            return nil
-        }()
-        perform("Uninstall") { $0.unwirePi(sourcePath: wiredPath) }
-    }
-
     func installCLI() {
         perform("Install") { engine in
-            try engine.materialize()
-            try engine.linkCLI()
+            try engine.prepare()
             return true
         }
     }
@@ -166,201 +185,69 @@ final class InstallerModel: ObservableObject {
 
 struct GeneralSettingsView: View {
     @ObservedObject var model: InstallerModel
-    @State private var confirmUninstall: AgentLogo?
-    /// The second line cycles per click: indicator → location → copy the
-    /// location (flash "Copied", settle back to the location) → indicator.
-    @State private var revealPhase: [AgentLogo: Int] = [:]
-    @State private var copiedFlash: Set<AgentLogo> = []
+    @State private var operation: OperationSheetModel?
 
     var body: some View {
-        VStack(spacing: 0) {
-            Form {
-                agentSections
-            }
-            .formStyle(.grouped)
-            .scrollDisabled(true)
-            .fixedSize(horizontal: false, vertical: true)
-        }
-        .sheet(isPresented: $model.showLog) { logSheet }
-        .confirmationDialog(
-            "Uninstall the plugin from \(confirmUninstall == .pi ? "pi" : "Claude Code")?",
-            isPresented: Binding(
-                get: { confirmUninstall != nil },
-                set: { if !$0 { confirmUninstall = nil } }),
-            titleVisibility: .visible
-        ) {
-            Button("Uninstall", role: .destructive) {
-                switch confirmUninstall {
-                case .claude: model.uninstallClaude()
-                case .pi: model.uninstallPi()
-                case nil: break
-                }
-                confirmUninstall = nil
-            }
-            Button("Cancel", role: .cancel) { confirmUninstall = nil }
-        } message: {
-            Text("Removes the wiring from the agent. No files are deleted.")
-        }
-        .onAppear { model.refresh() }
-    }
-
-    // ------------------------------------------------------- agent rows
-
-    @ViewBuilder private var agentSections: some View {
-        Section {
-            agentRow(logo: .claude, title: "Claude Code",
-                     status: model.snapshot?.claude, install: model.installClaude)
-            agentRow(logo: .pi, title: "pi",
-                     status: model.snapshot?.pi, install: model.installPi)
-            if let error = model.lastError {
-                HStack(spacing: 6) {
-                    Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
-                    Text(error).font(.caption)
-                    Spacer()
-                    Button("Show Log") { model.showLog = true }
-                        .controlSize(.small)
-                }
-            }
-        } header: {
-            HStack {
-                Text("Agent Plugins")
-                Spacer()
-                Button {
-                    model.refresh()
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .help("Refresh")
-                .disabled(model.busy)
-            }
-        }
-    }
-
-    /// The agent name's cap height, rounded to whole points: the logo
-    /// matches it and sits on the baseline, an inline mark, not a badge.
-    private static let nameCapHeight =
-        NSFont.systemFont(ofSize: NSFont.systemFontSize).capHeight.rounded()
-
-    /// Line 1: logo + name + (version) left, the action button right.
-    /// Line 2: the installed-state indicator; clicking it swaps in the
-    /// plugin location, clicking again swaps back.
-    @ViewBuilder
-    private func agentRow(logo: AgentLogo, title: String, status: AgentStatus?,
-                          install: @escaping () -> Void) -> some View {
-        HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    AgentLogoView(logo: logo, size: Self.nameCapHeight)
-                        .alignmentGuide(.firstTextBaseline) { $0[.bottom] }
-                    Text(title)
-                    if let version = status?.binaryVersion?
-                        .components(separatedBy: " ").first {
-                        Text("(\(version))").foregroundStyle(.secondary)
+        Form {
+            Section {
+                ForEach(model.snapshot?.agents ?? []) { agent in
+                    AgentCellView(status: agent) { verb in
+                        present(verb, for: agent)
                     }
                 }
-                Button {
-                    let phase = ((revealPhase[logo] ?? 0) + 1) % 3
-                    revealPhase[logo] = phase
-                    if phase == 2 {
-                        let pasteboard = NSPasteboard.general
-                        pasteboard.clearContents()
-                        pasteboard.setString(locationLine(for: status), forType: .string)
-                        copiedFlash.insert(logo)
-                        Task {
-                            try? await Task.sleep(for: .seconds(1.2))
-                            copiedFlash.remove(logo)
-                        }
+                if model.snapshot == nil {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Reading the agents…").foregroundStyle(.secondary)
                     }
-                } label: {
-                    if (revealPhase[logo] ?? 0) == 0 {
-                        statusIndicator(installed: isWired(status))
-                    } else {
-                        Text(copiedFlash.contains(logo)
-                             ? "Copied" : locationLine(for: status))
+                }
+                if let failure = model.syncFailure {
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text(failure)
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                .buttonStyle(.plain)
-            }
-            Spacer()
-            // Vertically centered against the whole cell.
-            Group {
-                switch status?.wiring {
-                case .installed, .devCheckout:
-                    Button("Uninstall…") { confirmUninstall = logo }
-                        .disabled(model.busy)
-                case .notInstalled:
-                    Button("Install", action: install)
-                        .disabled(model.busy)
-                case .agentMissing:
-                    Button("Install", action: install).disabled(true)
-                case nil:
-                    EmptyView()
+            } header: {
+                HStack {
+                    Text("Agents")
+                    Spacer()
+                    Button {
+                        model.refresh()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help("Refresh")
                 }
             }
-            .fixedSize()
         }
-        .padding(.vertical, 2)
-    }
-
-    private func isWired(_ status: AgentStatus?) -> Bool {
-        switch status?.wiring {
-        case .installed, .devCheckout: return true
-        default: return false
+        .formStyle(.grouped)
+        .scrollDisabled(true)
+        .fixedSize(horizontal: false, vertical: true)
+        .sheet(item: $operation) { sheet in
+            OperationSheetView(model: sheet)
         }
-    }
-
-    private func statusIndicator(installed: Bool) -> some View {
-        HStack(spacing: 5) {
-            Circle()
-                .fill(installed ? Color.green : Color.secondary.opacity(0.4))
-                .frame(width: 7, height: 7)
-            Text(installed ? "Installed" : "Not Installed")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    private func locationLine(for status: AgentStatus?) -> String {
-        switch status?.wiring {
-        case .devCheckout(let path):
-            return abbreviate(path)
-        case .installed:
-            return abbreviate((model.snapshot?.payloadDir ?? "")
-                + "/plugins/continuation")
-        case .notInstalled:
-            return "—"
-        case .agentMissing:
-            return "not found on this Mac"
-        case nil:
-            return "—"
-        }
-    }
-
-    // ---------------------------------------------------------------- log
-
-    private var logSheet: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Installer Log").font(.headline)
-            ScrollView {
-                Text(model.transcript.isEmpty ? "Nothing run yet." : model.transcript)
-                    .font(.system(.caption, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-            HStack {
-                Spacer()
-                Button("Close") { model.showLog = false }
-                    .keyboardShortcut(.defaultAction)
+        .onAppear { model.refresh(syncing: true) }
+        .task {
+            // The slower cadence; detection stays cheap in between.
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(30))
+                model.refresh()
             }
         }
-        .padding(16)
-        .frame(width: 520, height: 360)
+    }
+
+    /// The cell's action opens the sheet; nothing runs from the cell.
+    private func present(_ verb: OperationVerb, for agent: AgentStatus) {
+        operation = OperationSheetModel(
+            plan: OperationPlanner.plan(verb, for: agent, paths: model.engine.paths),
+            engine: model.engine,
+            onFinish: { model.refresh() })
     }
 }
 
@@ -447,50 +334,6 @@ struct CLISettingsView: View {
             Text("Removes the command from PATH. No files are deleted.")
         }
         .onAppear { model.refresh() }
-    }
-}
-
-/// Each agent is identified by its own mark: Claude Code by the Claude
-/// spark (the vendor's published icon, used nominatively to identify the
-/// product), pi by the π glyph — which IS its mark: pi's own app title is
-/// the bare glyph.
-enum AgentLogo {
-    case claude
-    case pi
-}
-
-struct AgentLogoView: View {
-    let logo: AgentLogo
-    var size: CGFloat = 22
-
-    private var corner: CGFloat { size * 0.23 }
-
-    var body: some View {
-        switch logo {
-        case .claude:
-            if let url = Bundle.module.url(forResource: "claude-logo", withExtension: "png"),
-               let image = NSImage(contentsOf: url) {
-                Image(nsImage: image)
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: size, height: size)
-                    .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
-            } else {
-                RoundedRectangle(cornerRadius: corner, style: .continuous)
-                    .fill(Color(red: 0.80, green: 0.42, blue: 0.30))
-                    .frame(width: size, height: size)
-                    .overlay(Text("✳︎").font(.system(size: size * 0.55))
-                        .foregroundStyle(.white))
-            }
-        case .pi:
-            RoundedRectangle(cornerRadius: corner, style: .continuous)
-                .fill(Color(white: 0.13))
-                .frame(width: size, height: size)
-                .overlay(
-                    Text("π")
-                        .font(.system(size: size * 0.64, weight: .semibold, design: .serif))
-                        .foregroundStyle(.white))
-        }
     }
 }
 
