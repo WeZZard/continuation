@@ -1,3 +1,4 @@
+import AppKit
 import ContinuationsKit
 import SwiftUI
 
@@ -23,6 +24,7 @@ struct ReviewConsoleView: View {
     @State private var message = ""
     @State private var failed = false
     @State private var sending = false
+    @State private var copiedCommand = false
 
     private var item: ReviewItem? { row.review }
 
@@ -88,10 +90,8 @@ struct ReviewConsoleView: View {
                     .font(.system(.body, design: .monospaced))
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                TextField("Feedback, if you want changes", text: $feedback,
-                          axis: .vertical)
-                    .lineLimit(2...5)
-                    .textFieldStyle(.roundedBorder)
+                ProseEditor(prompt: "Feedback, if you want changes",
+                            text: $feedback, minHeight: 72)
             }
         case "stopped":
             messageBlock
@@ -142,20 +142,60 @@ struct ReviewConsoleView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Send this session its next message.")
                 .foregroundStyle(.secondary)
-            TextField("Message", text: $message, axis: .vertical)
-                .lineLimit(3...10)
-                .textFieldStyle(.roundedBorder)
-                .disabled(!row.canReceiveMessage)
+            ProseEditor(prompt: "Message", text: $message, minHeight: 120,
+                        enabled: row.canReceiveMessage)
             if !row.canReceiveMessage {
-                Text(row.isLocal
-                     ? "This session is not holding, so a message has nowhere "
-                       + "to land. Launch it with CONTINUATION_REVIEW_HOLD set "
-                       + "to keep it reachable — the Agent settings panel has "
-                       + "the command."
-                     : "This session runs on another node; act on it there.")
+                unreachableNotice
+            }
+        }
+    }
+
+    /// Why the box is closed, and the one action that opens it. A reason
+    /// without a remedy is just a locked door.
+    @ViewBuilder private var unreachableNotice: some View {
+        if row.isLocal {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("This session is not holding, so a message would have "
+                     + "nowhere to land. A session launched with the command "
+                     + "below stays reachable between turns.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    Text(CaptureLaunch.command(for: .claude,
+                                               pluginDirectory: consoleDirectory,
+                                               held: true) ?? "")
+                        .font(.system(.caption2, design: .monospaced))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                    Button(copiedCommand ? "Copied" : "Copy") { copyLaunch() }
+                        .controlSize(.small)
+                        .fixedSize()
+                }
             }
+        } else {
+            Text("This session runs on another node; act on it there.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var consoleDirectory: URL {
+        InstallerEngine.Paths.standard().consoleSource
+    }
+
+    private func copyLaunch() {
+        guard let command = CaptureLaunch.command(
+            for: .claude, pluginDirectory: consoleDirectory, held: true)
+        else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(command, forType: .string)
+        copiedCommand = true
+        Task {
+            try? await Task.sleep(for: .milliseconds(1100))
+            copiedCommand = false
         }
     }
 
@@ -207,8 +247,10 @@ struct ReviewConsoleView: View {
         case "stopped":
             Button("Dismiss") { dismissStop() }
                 .disabled(!row.isLocal || sending)
+            // Return belongs to the text view, so sending is ⌘↩ — the
+            // same key that sends a message everywhere else on this Mac.
             Button("Send") { sendMessage() }
-                .keyboardShortcut(.defaultAction)
+                .keyboardShortcut(.return, modifiers: .command)
                 .disabled(!row.canReceiveMessage || trimmedMessage.isEmpty || sending)
         default:
             EmptyView()
