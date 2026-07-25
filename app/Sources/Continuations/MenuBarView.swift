@@ -17,7 +17,7 @@ struct MenuBarView: View {
                   systemImage: StuckState.icon(pile.state))
         }
         Divider()
-        ForEach(store.nodes) { node in
+        ForEach(store.nodes.filter { !$0.excluded }) { node in
             Label(nodeLine(node),
                   systemImage: node.online ? "circle.fill" : "circle.dotted")
         }

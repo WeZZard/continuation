@@ -54,6 +54,18 @@ public struct Persistence: Sendable {
         return (try? JSONDecoder().decode([ManualNode].self, from: data)) ?? []
     }
 
+    private var excludedURL: URL { directory.appendingPathComponent("excluded-nodes.json") }
+
+    public func loadExcludedKeys() -> Set<String> {
+        guard let data = try? Data(contentsOf: excludedURL) else { return [] }
+        return (try? JSONDecoder().decode(Set<String>.self, from: data)) ?? []
+    }
+
+    public func saveExcludedKeys(_ keys: Set<String>) {
+        guard let data = try? JSONEncoder().encode(keys.sorted()) else { return }
+        try? data.write(to: excludedURL, options: .atomic)
+    }
+
     public func saveManualNodes(_ nodes: [ManualNode]) {
         guard let data = try? JSONEncoder().encode(nodes) else { return }
         try? data.write(to: manualURL, options: .atomic)

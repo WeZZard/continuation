@@ -42,15 +42,31 @@ final class FleetStoreTests: XCTestCase {
         XCTAssertEqual(store.nodes.count, 2)
     }
 
-    func testUserRemovalOfDiscoveredNodeSticks() {
-        let store = makeStore()
+    func testExclusionPersistsAcrossStoresAndBonjourTicks() {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("fleet-test-\(UUID().uuidString)")
+        let persistence = Persistence(directory: dir)
         let service = DiscoveredService(
             name: "m", url: URL(string: "http://m.local:7787")!, nodeID: "X")
+
+        let store = FleetStore(persistence: persistence)
         store.upsertBonjour(service)
-        XCTAssertEqual(store.nodes.count, 1)
-        store.removeNode(key: "bonjour:m")
+        store.setExcluded(true, key: "bonjour:m")
+        XCTAssertEqual(store.nodes.map(\.excluded), [true])
         store.upsertBonjour(service)   // the standing services list re-fires
-        XCTAssertTrue(store.nodes.isEmpty)
+        XCTAssertEqual(store.nodes.count, 1)
+
+        // A fresh store (new launch) re-applies the exclusion at upsert.
+        let relaunched = FleetStore(persistence: persistence)
+        relaunched.upsertBonjour(service)
+        XCTAssertEqual(relaunched.nodes.map(\.excluded), [true])
+
+        // Excluded nodes contribute nothing to the fleet aggregation.
+        XCTAssertTrue(relaunched.dueEntries.isEmpty)
+
+        // The toggle reverses.
+        relaunched.setExcluded(false, key: "bonjour:m")
+        XCTAssertEqual(relaunched.nodes.map(\.excluded), [false])
     }
 
     func testPollDedupePrefersDiscovered() {

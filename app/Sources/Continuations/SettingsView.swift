@@ -24,22 +24,39 @@ struct NodesSettingsView: View {
         Form {
             Section("Known Nodes") {
                 ForEach(store.nodes) { node in
-                    HStack {
-                        HealthDot(online: node.online)
-                        VStack(alignment: .leading) {
-                            HStack(spacing: 4) {
-                                Text(node.displayName)
-                                if node.isLocal {
-                                    Text("(This Mac)").foregroundStyle(.secondary)
-                                }
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 4) {
+                            Text(node.displayName)
+                            if node.isLocal {
+                                Text("(This Mac)").foregroundStyle(.secondary)
                             }
+                            Spacer()
+                            if node.source == .bonjour {
+                                // A discovered node re-appears on the next
+                                // Bonjour tick — removal would be a lie.
+                                HStack(spacing: 6) {
+                                    Text("Exclude")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Toggle("Exclude", isOn: Binding(
+                                        get: { node.excluded },
+                                        set: { store.setExcluded($0, key: node.key) }))
+                                        .toggleStyle(.switch)
+                                        .controlSize(.small)
+                                        .labelsHidden()
+                                }
+                            } else {
+                                Button("Remove") { store.removeNode(key: node.key) }
+                            }
+                        }
+                        HStack(spacing: 6) {
+                            HealthDot(online: node.online)
                             Text("\(node.source == .bonjour ? "discovered" : "manual") · \(node.url.absoluteString)")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
-                        Spacer()
-                        Button("Remove") { store.removeNode(key: node.key) }
                     }
+                    .padding(.vertical, 2)
                 }
                 if store.nodes.isEmpty {
                     Text("No nodes known yet.").foregroundStyle(.secondary)

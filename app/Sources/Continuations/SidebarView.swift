@@ -23,7 +23,7 @@ struct SidebarView: View {
                     .tag(SidebarSelection.activity)
             }
             Section("Nodes") {
-                ForEach(store.nodes) { node in
+                ForEach(store.nodes.filter { !$0.excluded }) { node in
                     HStack(spacing: 8) {
                         HealthDot(online: node.online)
                         VStack(alignment: .leading, spacing: 1) {

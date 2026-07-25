@@ -22,6 +22,10 @@ public struct NodeState: Identifiable, Hashable {
     public var online: Bool = false
     public var lastSeen: Date?
     public var lastEventID: Int = 0
+    /// Excluded from the fleet (views, aggregation, polling) while the
+    /// row stays visible in Settings — the reversible form of removal
+    /// for discovered nodes, which re-appear if merely removed.
+    public var excluded: Bool = false
 
     public var id: String { key }
     public var pendingCount: Int {
@@ -119,10 +123,9 @@ public final class FleetStore: ObservableObject {
     private var loops: [String: Task<Void, Never>] = [:]
     private var cancellables: Set<AnyCancellable> = []
 
-    /// Removals must outlive the next Bonjour tick: a deduped or
-    /// user-removed discovered node stays gone instead of being re-added
-    /// by the standing services list.
-    private var suppressedKeys: Set<String> = []
+    /// Persisted exclusions: discovered nodes cannot be removed (the
+    /// next Bonjour tick would re-add them), only excluded.
+    private var excludedKeys: Set<String> = []
 
     /// Events that change what a queue view shows; anything else is audit.
     private static let refreshingCommands: Set<String> = [
@@ -132,6 +135,7 @@ public final class FleetStore: ObservableObject {
 
     public init(persistence: Persistence = Persistence()) {
         self.persistence = persistence
+        excludedKeys = persistence.loadExcludedKeys()
         for snapshot in persistence.loadSnapshots() {
             guard let url = URL(string: snapshot.urlString) else { continue }
             nodes.append(NodeState(
@@ -140,10 +144,11 @@ public final class FleetStore: ObservableObject {
                 url: url, displayName: snapshot.displayName,
                 info: snapshot.info, queue: snapshot.queue,
                 online: false, lastSeen: snapshot.lastSeen,
-                lastEventID: snapshot.lastEventID))
+                lastEventID: snapshot.lastEventID,
+                excluded: excludedKeys.contains(snapshot.key)))
         }
         sortNodes()
-        for node in nodes { startLoop(key: node.key) }
+        for node in nodes where !node.excluded { startLoop(key: node.key) }
         for manual in persistence.loadManualNodes() { upsertManual(manual) }
         discovery.$services
             .receive(on: DispatchQueue.main)
@@ -171,14 +176,30 @@ public final class FleetStore: ObservableObject {
         loops[key] = nil
         nodes.removeAll { $0.key == key }
         persistence.deleteSnapshot(key: key)
-        if key.hasPrefix("bonjour:") {
-            suppressedKeys.insert(key)
-        }
         if key.hasPrefix("manual:") {
             let remaining = persistence.loadManualNodes().filter { $0.key != key }
             persistence.saveManualNodes(remaining)
-            // A removed manual node may free its discovered face.
-            suppressedKeys.removeAll()
+        }
+    }
+
+    /// The reversible removal for discovered nodes: the row stays, the
+    /// node leaves the fleet. Exclusion persists across launches.
+    public func setExcluded(_ excluded: Bool, key: String) {
+        if excluded {
+            excludedKeys.insert(key)
+        } else {
+            excludedKeys.remove(key)
+        }
+        persistence.saveExcludedKeys(excludedKeys)
+        update(key: key) { node in
+            node.excluded = excluded
+            if excluded { node.online = false }
+        }
+        if excluded {
+            loops[key]?.cancel()
+            loops[key] = nil
+        } else {
+            startLoop(key: key)
         }
     }
 
@@ -228,7 +249,7 @@ public final class FleetStore: ObservableObject {
 
     private func collect(_ section: KeyPath<QueueSnapshot, [QueueEntry]>) -> [FleetEntry] {
         nodes.flatMap { node -> [FleetEntry] in
-            guard let queue = node.queue else { return [] }
+            guard !node.excluded, let queue = node.queue else { return [] }
             return queue[keyPath: section].map {
                 FleetEntry(nodeKey: node.key, nodeName: node.displayName,
                            nodeOnline: node.online, entry: $0)
@@ -251,7 +272,6 @@ public final class FleetStore: ObservableObject {
 
     func upsertBonjour(_ service: DiscoveredService) {
         let key = "bonjour:\(service.name)"
-        guard !suppressedKeys.contains(key) else { return }
         // Discovery outranks a by-address entry for the same node id: the
         // advertisement is live identity, the address entry only its
         // fallback. Displacing leaves manual-nodes.json untouched, so the
@@ -275,18 +295,18 @@ public final class FleetStore: ObservableObject {
 
     private func upsert(key: String, source: NodeSource, url: URL,
                         fallbackName: String) {
-        guard !suppressedKeys.contains(key) else { return }
         if let index = nodes.firstIndex(where: { $0.key == key }) {
-            if nodes[index].url != url {
+            if nodes[index].url != url, !nodes[index].excluded {
                 nodes[index].url = url
                 restartLoop(key: key)
             }
             return
         }
         nodes.append(NodeState(key: key, source: source, url: url,
-                               displayName: fallbackName))
+                               displayName: fallbackName,
+                               excluded: excludedKeys.contains(key)))
         sortNodes()
-        startLoop(key: key)
+        if !excludedKeys.contains(key) { startLoop(key: key) }
     }
 
     private func sortNodes() {
