@@ -14,10 +14,30 @@ let files = try FileManager.default
     .contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
     .filter { $0.pathExtension == "png" }
 
+/// The artwork's bounding box — the icon tile, inside the canvas margins.
+func tileBounds(of rep: NSBitmapImageRep) -> NSRect {
+    let width = rep.pixelsWide, height = rep.pixelsHigh
+    func opaque(_ x: Int, _ y: Int) -> Bool {
+        (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.05
+    }
+    var minX = 0
+    while minX < width, !(0..<height).contains(where: { opaque(minX, $0) }) { minX += 1 }
+    var maxX = width - 1
+    while maxX > minX, !(0..<height).contains(where: { opaque(maxX, $0) }) { maxX -= 1 }
+    var minY = 0
+    while minY < height, !(0..<width).contains(where: { opaque($0, minY) }) { minY += 1 }
+    var maxY = height - 1
+    while maxY > minY, !(0..<width).contains(where: { opaque($0, maxY) }) { maxY -= 1 }
+    return NSRect(x: minX, y: minY,
+                  width: maxX - minX + 1, height: maxY - minY + 1)
+}
+
 for file in files {
     guard let rep = NSBitmapImageRep(data: try Data(contentsOf: file)) else { continue }
     let width = rep.pixelsWide, height = rep.pixelsHigh
     let size = CGFloat(min(width, height))
+    let tile = tileBounds(of: rep)
+    let tileSize = min(tile.width, tile.height)
     let source = NSImage(size: NSSize(width: width, height: height))
     source.addRepresentation(rep)
 
@@ -51,10 +71,13 @@ for file in files {
     // Both ring edges follow the icon's continuous-corner curve: the outer
     // edge is the icon's own silhouette; the inner edge is that same
     // silhouette scaled inward by the band, so the corners stay aligned
-    // with the system icon shape.
+    // with the system icon shape. Band thickness: tile size × 0.09 —
+    // scaling the whole canvas moves the tile edge by inset × tile/canvas,
+    // hence the inverse factor on the inset.
     source.draw(in: rect, from: .zero, operation: .destinationIn, fraction: 1)
-    let band = size * 0.09
-    source.draw(in: rect.insetBy(dx: band, dy: band), from: .zero,
+    let band = tileSize * 0.09
+    let inset = band * size / tileSize
+    source.draw(in: rect.insetBy(dx: inset, dy: inset), from: .zero,
                 operation: .destinationOut, fraction: 1)
 
     // The icon itself sits under the ring.

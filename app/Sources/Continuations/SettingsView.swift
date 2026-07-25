@@ -24,36 +24,39 @@ struct NodesSettingsView: View {
         Form {
             Section("Known Nodes") {
                 ForEach(store.nodes) { node in
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 4) {
-                            Text(node.displayName)
-                            if node.isLocal {
-                                Text("(This Mac)").foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            if node.source == .bonjour {
-                                // A discovered node re-appears on the next
-                                // Bonjour tick — removal would be a lie.
-                                HStack(spacing: 6) {
-                                    Text("Exclude")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                    Toggle("Exclude", isOn: Binding(
-                                        get: { node.excluded },
-                                        set: { store.setExcluded($0, key: node.key) }))
-                                        .toggleStyle(.switch)
-                                        .controlSize(.small)
-                                        .labelsHidden()
+                    HStack(spacing: 8) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 4) {
+                                Text(node.displayName)
+                                if node.isLocal {
+                                    Text("(This Mac)").foregroundStyle(.secondary)
                                 }
-                            } else {
-                                Button("Remove") { store.removeNode(key: node.key) }
+                            }
+                            HStack(spacing: 6) {
+                                HealthDot(online: node.online)
+                                Text("\(node.source == .bonjour ? "discovered" : "manual") · \(node.url.absoluteString)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
                             }
                         }
-                        HStack(spacing: 6) {
-                            HealthDot(online: node.online)
-                            Text("\(node.source == .bonjour ? "discovered" : "manual") · \(node.url.absoluteString)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                        Spacer()
+                        // Vertically centered against the whole cell.
+                        if node.source == .bonjour {
+                            // A discovered node re-appears on the next
+                            // Bonjour tick — removal would be a lie.
+                            HStack(spacing: 6) {
+                                Text("Exclude")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Toggle("Exclude", isOn: Binding(
+                                    get: { node.excluded },
+                                    set: { store.setExcluded($0, key: node.key) }))
+                                    .toggleStyle(.switch)
+                                    .controlSize(.small)
+                                    .labelsHidden()
+                            }
+                        } else {
+                            Button("Remove") { store.removeNode(key: node.key) }
                         }
                     }
                     .padding(.vertical, 2)
