@@ -294,6 +294,31 @@ with the user first).
   copied command: session ran clean, store shows raise+clear.
 - Swift tests 31 → 33 (launch command quoting, pi returning none).
 
+## Addendum: the capture hook is Node, and sessions announce themselves (2026-07-26)
+
+- **The hook is now `review.mjs`, run by `node`** (user ruling): Claude
+  Code IS a Node program, so node is present wherever a session is —
+  no interpreter to find, no version to match. The Python hook had
+  already broken once on macOS's system 3.9. Deleted; tests drive the
+  .mjs through node. It keeps an env-gated diagnostic:
+  `CONTINUATION_HOOK_LOG=/path` logs every event, the resolved CLI, and
+  each call's status/stderr — that is how the failures below were found.
+- **Session presence heals from any event.** SessionStart is not
+  reliable for a --plugin-dir plugin (Claude Code can dispatch it before
+  the session-only plugin has loaded), so every live event upserts the
+  session. Store gains a `sessions` table, CLI a `session` verb, serve
+  `/v1/sessions`, sidebar a Sessions section (running rows state
+  presence, waiting rows open the console).
+- **Plugin edits kill a running session's hooks.** Observed twice: hooks
+  fired, the plugin's files were edited mid-session, hooks then stopped
+  firing entirely for that session. Claude Code documents that plugin
+  `hooks/` changes need `/reload-plugins` or a restart — in practice the
+  hooks go silent. NEVER edit a materialized plugin while a supervised
+  session is running; restart the session after any plugin change.
+- Live-verified after the rewrite: one headless run produced
+  SessionStart → UserPromptSubmit → stop raise → clear → session.end,
+  every CLI call status 0.
+
 ## Not done / open
 
 - **Not published to the wezzard-skills marketplace** — that catalog pins

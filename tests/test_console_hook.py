@@ -12,7 +12,7 @@ from pathlib import Path
 
 BIN = str(Path(__file__).resolve().parent.parent / "bin" / "continuation")
 HOOK = str(Path(__file__).resolve().parent.parent
-           / "plugins" / "console" / "hooks" / "review.py")
+           / "plugins" / "console" / "hooks" / "review.mjs")
 
 
 def run_hook(store, payload, extra_env=None, timeout=30):
@@ -22,10 +22,10 @@ def run_hook(store, payload, extra_env=None, timeout=30):
                 "CONTINUATION_BIN": BIN,
                 "CONTINUATION_REVIEW_WAIT": "5"})
     env.update(extra_env or {})
-    # /usr/bin/python3 exactly as hooks.json runs it — the system Python
-    # is older than any dev interpreter and must stay supported.
+    # node exactly as hooks.json runs it: Claude Code is a Node program,
+    # so node is present wherever a session is.
     return subprocess.run(
-        ["/usr/bin/python3", HOOK], input=json.dumps(payload),
+        ["node", HOOK], input=json.dumps(payload),
         text=True, capture_output=True, env=env, timeout=timeout)
 
 

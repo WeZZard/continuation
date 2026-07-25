@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/review.py",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}\"/hooks/review.mjs",
             "timeout": 320
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/review.py"
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}\"/hooks/review.mjs"
           }
         ]
       }
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/review.py"
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}\"/hooks/review.mjs"
           }
         ]
       }
@@ -38,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/review.py"
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}\"/hooks/review.mjs"
           }
         ]
       }
@@ -48,7 +48,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/review.py"
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}\"/hooks/review.mjs"
           }
         ]
       }
@@ -58,7 +58,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/review.py"
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}\"/hooks/review.mjs"
           }
         ]
       }
