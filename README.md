@@ -212,6 +212,22 @@ raise|wait|answer|clear|list`), serve at `/v1/reviews`, and stream over
 the events SSE. Actions are local-node only in v1. Dispatcher-spawned
 sessions never reach the box (`AGENTIC_TASK_ID` guard).
 
+A started session is itself a review item: it is idle, waiting for the
+human to push it into work, so `SessionStart` raises one the same way
+`Stop` does.
+
+**A session in an untrusted workspace can never appear.** Claude Code
+refuses to run any hook where workspace trust has not been accepted —
+its debug log says `Skipping SessionStart:startup hook execution -
+workspace trust not accepted`, and the same line appears for
+`SessionEnd` and the status line. The plugin loads and its hooks
+register; they are simply never executed, so the session is invisible to
+the box through no fault of the plugin. Trust is per project directory
+in `~/.claude.json` (`projects.<dir>.hasTrustDialogAccepted`), read at
+startup — accepting it takes effect on the next session, not the running
+one. Diagnose with `claude --debug` and grep the log named on screen for
+`trust`.
+
 ## License
 
 GNU Affero General Public License v3.0 or later — see `LICENSE`. The

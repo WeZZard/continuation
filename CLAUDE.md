@@ -40,3 +40,12 @@ it carries the current state, pending work, and the settled design rulings.
 - The registered task `jlens-mobile-lens-ab` is real and load-bearing; its
   MUST NOTs (never touch the fitting jobs on the Mac minis, never push to
   git remotes) are recorded in the registry — honor them in any manual test.
+- Hooks not firing is usually not the plugin: Claude Code skips ALL hook
+  execution in a workspace whose trust was never accepted
+  (`projects.<dir>.hasTrustDialogAccepted` in `~/.claude.json`, read at
+  startup). Confirm with `claude --debug` and grep the named log for
+  `trust` before touching hook code — this repo itself was untrusted
+  until 2026-07-26 and no console hook had ever run in it.
+- Probe a hook end to end with `CONTINUATION_HOOK_LOG=/tmp/x`; launch the
+  probe with stdin held open (`sleep 30 | script -q /dev/null claude …`),
+  since an immediate EOF declines whatever dialog is waiting.
