@@ -227,6 +227,18 @@ with the user first).
   read-only by ruling); blocking default 300s via
   CONTINUATION_REVIEW_WAIT.
 
+## Addendum: hand-made wiring removed (2026-07-25, late)
+
+- User ruling: with the app owning installation, the dev wiring created
+  by hand during the build is gone — `continuation@continuation`
+  uninstalled and its marketplace removed from Claude Code (cache
+  purged), the pi package removed. Both agents verified clean. The
+  schedule skill is now installed on a machine ONLY through the app's
+  Agents panel (materialize to the build's own umbrella, wire by
+  pointer); the console plugin only ever by `--plugin-dir` at launch.
+  The CLI PATH link (~/.local/bin/continuation → repo bin) remains —
+  it is not a plugin and has its own CLI-panel Uninstall.
+
 ## Not done / open
 
 - **Not published to the wezzard-skills marketplace** — that catalog pins
