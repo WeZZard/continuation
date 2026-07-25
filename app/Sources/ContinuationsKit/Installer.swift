@@ -9,8 +9,8 @@ import Foundation
 // installed_plugins.json — is theirs alone to write); the enabled flag is
 // documented user configuration in each agent's settings.json, which the
 // app edits directly like any settings GUI. A wiring that points anywhere
-// other than the materialized payload is a development checkout: its
-// enable flag may be toggled, its wiring is never moved.
+// other than the materialized payload is a development checkout: the app
+// changes it only on an explicit button press, never automatically.
 
 public enum PluginWiring: Equatable, Sendable {
     case agentMissing
@@ -375,10 +375,13 @@ public final class InstallerEngine {
             .status == 0
     }
 
+    /// Remove the pi package by its actual wired path — the payload copy
+    /// or a development checkout; the caller passes what the snapshot saw.
     @discardableResult
-    public func unwirePi() -> Bool {
-        shell("pi remove '\(paths.payloadDest.appendingPathComponent("plugins/continuation").path)'")
-            .status == 0
+    public func unwirePi(sourcePath: String? = nil) -> Bool {
+        let path = sourcePath
+            ?? paths.payloadDest.appendingPathComponent("plugins/continuation").path
+        return shell("pi remove '\(path)'").status == 0
     }
 
     // ------------------------------------------------------------- helpers

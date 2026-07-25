@@ -171,7 +171,14 @@ final class InstallerModel: ObservableObject {
     }
 
     func uninstallClaude() { perform("Uninstall") { $0.unwireClaude() } }
-    func uninstallPi() { perform("Uninstall") { $0.unwirePi() } }
+
+    func uninstallPi() {
+        let wiredPath: String? = {
+            if case .devCheckout(let path) = snapshot?.pi.wiring { return path }
+            return nil
+        }()
+        perform("Uninstall") { $0.unwirePi(sourcePath: wiredPath) }
+    }
 
     func setClaudeEnabled(_ on: Bool) {
         perform(on ? "Enable" : "Disable") { try $0.setClaudeEnabled(on); return true }
@@ -184,6 +191,7 @@ final class InstallerModel: ObservableObject {
 
 struct AgentsSettingsView: View {
     @StateObject private var model = InstallerModel()
+    @State private var confirmUninstall: AgentLogo?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -213,6 +221,25 @@ struct AgentsSettingsView: View {
             .disabled(model.busy)
         }
         .sheet(isPresented: $model.showLog) { logSheet }
+        .confirmationDialog(
+            "Uninstall the plugin from \(confirmUninstall == .pi ? "pi" : "Claude Code")?",
+            isPresented: Binding(
+                get: { confirmUninstall != nil },
+                set: { if !$0 { confirmUninstall = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Uninstall", role: .destructive) {
+                switch confirmUninstall {
+                case .claude: model.uninstallClaude()
+                case .pi: model.uninstallPi()
+                case nil: break
+                }
+                confirmUninstall = nil
+            }
+            Button("Cancel", role: .cancel) { confirmUninstall = nil }
+        } message: {
+            Text("Removes the wiring from the agent. No files are deleted.")
+        }
         .onAppear { model.refresh() }
     }
 
@@ -230,7 +257,7 @@ struct AgentsSettingsView: View {
                     .foregroundStyle(.secondary)
             case .devOnly:
                 Image(systemName: "flag").foregroundStyle(.orange)
-                Text("Development wiring — this Mac is driven from a checkout, left alone.")
+                Text("Development wiring — this Mac is driven from a checkout.")
             case .fresh:
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
@@ -320,7 +347,6 @@ struct AgentsSettingsView: View {
                     }
                 },
                 install: model.installClaude,
-                uninstall: model.uninstallClaude,
                 setEnabled: model.setClaudeEnabled,
                 footnote: "New sessions pick up changes after restart.")
             agentRow(
@@ -334,7 +360,6 @@ struct AgentsSettingsView: View {
                     return "continuation:schedule"
                 },
                 install: model.installPi,
-                uninstall: model.uninstallPi,
                 setEnabled: model.setPiEnabled,
                 footnote: nil)
             if let error = model.lastError {
@@ -353,7 +378,6 @@ struct AgentsSettingsView: View {
     private func agentRow(logo: AgentLogo, title: String, status: AgentStatus?,
                           wiringLine: (PluginWiring) -> String,
                           install: @escaping () -> Void,
-                          uninstall: @escaping () -> Void,
                           setEnabled: @escaping (Bool) -> Void,
                           footnote: String?) -> some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -394,14 +418,19 @@ struct AgentsSettingsView: View {
                     Button("Install") {}.disabled(true)
                 }
             case .devCheckout(let path):
-                Label {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("wired to a development checkout — left alone")
-                            .font(.caption)
-                        Text(abbreviate(path)).font(.caption2).foregroundStyle(.secondary)
+                HStack(alignment: .top) {
+                    Label {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("wired to a development checkout")
+                                .font(.caption)
+                            Text(abbreviate(path)).font(.caption2).foregroundStyle(.secondary)
+                        }
+                    } icon: {
+                        Image(systemName: "flag.fill").foregroundStyle(.orange)
                     }
-                } icon: {
-                    Image(systemName: "flag.fill").foregroundStyle(.orange)
+                    Spacer()
+                    Button("Uninstall…") { confirmUninstall = logo }
+                        .disabled(!model.actionsAllowed || model.busy)
                 }
             case .notInstalled:
                 HStack {
@@ -421,7 +450,7 @@ struct AgentsSettingsView: View {
                         StatusMark(ok: true, text: "current")
                     }
                     Spacer()
-                    Button("Uninstall", action: uninstall)
+                    Button("Uninstall…") { confirmUninstall = logo }
                         .disabled(!model.actionsAllowed || model.busy)
                 }
                 if let footnote {
