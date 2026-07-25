@@ -67,6 +67,10 @@ SIZES
 else
     swift scripts/make-icon.swift "$ICONSET" > /dev/null
 fi
+# Debug builds carry the build identity on the icon: hazard stripes.
+if [[ "$CONFIG" == "debug" ]]; then
+    swift scripts/debug-badge.swift "$ICONSET"
+fi
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 
 # Payload: the `continuation` CLI + the agent plugin (plus the marketplace

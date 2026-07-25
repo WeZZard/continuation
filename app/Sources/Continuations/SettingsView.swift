@@ -47,10 +47,9 @@ struct NodesSettingsView: View {
 /// What the banner claims about this Mac, derived from one snapshot.
 enum AgentsBanner: Equatable {
     case checking
-    case fresh          // nothing installed → Set Up This Mac
+    case fresh          // a detected agent is unwired → Set Up This Mac
     case updateAvailable
     case current
-    case devOnly        // every detected agent is wired to a checkout
     case noPayload      // not running from a bundled app
 }
 
@@ -73,21 +72,14 @@ final class InstallerModel: ObservableObject {
         guard let snap = snapshot else { return .checking }
         if snap.bundledCLIVersion == nil { return .noPayload }
         let detected = [snap.claude, snap.pi].filter(\.detected)
-        let actionable = detected.filter {
-            if case .devCheckout = $0.wiring { return false } else { return true }
+        if detected.contains(where: { $0.wiring == .notInstalled }) { return .fresh }
+        if let installed = snap.installedCLIVersion,
+           installed != snap.bundledCLIVersion { return .updateAvailable }
+        // pi wiring is live; only Claude's version-keyed cache can lag.
+        if case .installed(let version) = snap.claude.wiring,
+           version != nil, version != snap.bundledPluginVersion {
+            return .updateAvailable
         }
-        if actionable.isEmpty && !detected.isEmpty && snap.installedCLIVersion == nil {
-            return .devOnly
-        }
-        if snap.installedCLIVersion == nil { return .fresh }
-        if snap.installedCLIVersion != snap.bundledCLIVersion { return .updateAvailable }
-        for agent in [snap.claude] {   // pi is live; only Claude's cache lags
-            if case .installed(let version) = agent.wiring,
-               version != nil, version != snap.bundledPluginVersion {
-                return .updateAvailable
-            }
-        }
-        if actionable.contains(where: { $0.wiring == .notInstalled }) { return .fresh }
         return .current
     }
 
@@ -192,14 +184,6 @@ struct AgentsSettingsView: View {
             Form {
                 commandLineSection
                 agentSections
-                if !model.actionsAllowed {
-                    Section {
-                        Label("Debug build: installation is disabled so it can't fight the release wiring.",
-                              systemImage: "ladybug")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
             }
             .formStyle(.grouped)
         }
@@ -248,9 +232,6 @@ struct AgentsSettingsView: View {
                 Image(systemName: "shippingbox").foregroundStyle(.secondary)
                 Text("This build carries no payload — run a bundled app to install.")
                     .foregroundStyle(.secondary)
-            case .devOnly:
-                Image(systemName: "flag").foregroundStyle(.orange)
-                Text("Development wiring — this Mac is driven from a checkout.")
             case .fresh:
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
@@ -392,14 +373,12 @@ struct AgentsSettingsView: View {
                 }
             case .devCheckout(let path):
                 HStack(alignment: .top) {
-                    Label {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("wired to a development checkout")
-                                .font(.caption)
-                            Text(abbreviate(path)).font(.caption2).foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text("installed").font(.caption)
+                            StatusMark(ok: true, text: nil)
                         }
-                    } icon: {
-                        Image(systemName: "flag.fill").foregroundStyle(.orange)
+                        Text(abbreviate(path)).font(.caption2).foregroundStyle(.secondary)
                     }
                     Spacer()
                     Button("Uninstall…") { confirmUninstall = logo }
