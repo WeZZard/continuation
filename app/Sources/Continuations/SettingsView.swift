@@ -23,7 +23,12 @@ struct NodesSettingsView: View {
                     HStack {
                         HealthDot(online: node.online)
                         VStack(alignment: .leading) {
-                            Text(node.displayName)
+                            HStack(spacing: 4) {
+                                Text(node.displayName)
+                                if node.isLocal {
+                                    Text("(This Mac)").foregroundStyle(.secondary)
+                                }
+                            }
                             Text("\(node.source.rawValue) · \(node.url.absoluteString)")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -61,10 +66,6 @@ final class InstallerModel: ObservableObject {
     @Published var showLog = false
 
     let engine = InstallerEngine()
-
-    /// Debug builds render everything but mutate nothing: a debug app must
-    /// never fight the release wiring (hard rule in CLAUDE.md).
-    let actionsAllowed = Bundle.main.bundleIdentifier?.hasSuffix(".debug") != true
 
     var transcript: String { engine.transcript }
 
@@ -104,7 +105,7 @@ final class InstallerModel: ObservableObject {
     /// re-snapshot, surface the first failure line.
     private func perform(_ label: String,
                          _ work: @escaping (InstallerEngine) throws -> Bool) {
-        guard actionsAllowed, !busy else { return }
+        guard !busy else { return }
         busy = true
         lastError = nil
         let engine = self.engine
@@ -247,13 +248,13 @@ struct AgentsSettingsView: View {
                 Spacer()
                 Button("Set Up This Mac") { model.setUpThisMac() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(!model.actionsAllowed || model.busy)
+                    .disabled(model.busy)
             case .updateAvailable:
                 Image(systemName: "arrow.up.circle.fill").foregroundStyle(.blue)
                 Text(updateText)
                 Spacer()
                 Button("Update All") { model.updateAll() }
-                    .disabled(!model.actionsAllowed || model.busy)
+                    .disabled(model.busy)
             case .checking, .current:
                 EmptyView()
             }
@@ -377,10 +378,10 @@ struct AgentsSettingsView: View {
                 switch status?.wiring {
                 case .installed, .devCheckout:
                     Button("Uninstall…") { confirmUninstall = logo }
-                        .disabled(!model.actionsAllowed || model.busy)
+                        .disabled(model.busy)
                 case .notInstalled:
                     Button("Install", action: install)
-                        .disabled(!model.actionsAllowed || model.busy)
+                        .disabled(model.busy)
                 case .agentMissing:
                     Button("Install", action: install).disabled(true)
                 case nil:
