@@ -29,7 +29,7 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}\"/hooks/review.mjs",
-            "timeout": 1815
+            "timeout": 86415
           }
         ]
       }

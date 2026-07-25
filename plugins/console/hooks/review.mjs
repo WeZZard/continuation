@@ -86,6 +86,11 @@ function waitSeconds() {
  *  hold shows up in the review box with every action greyed out, which
  *  is the box failing at its one job — so sessions hold by default.
  *
+ *  The window is a day, because a session idle since this morning is
+ *  exactly the one worth a message this afternoon. A 30-minute window
+ *  looked reasonable and failed the only way that matters: the user came
+ *  back at 35 minutes to a dead box (2026-07-26).
+ *
  *  It costs the terminal: Claude Code queues whatever is typed while a
  *  hook runs and dispatches no event for it, so a message typed into the
  *  terminal mid-hold is acted on only once the hold ends (measured: typed
@@ -93,8 +98,8 @@ function waitSeconds() {
  *  a hold at once, and CONTINUATION_REVIEW_HOLD=0 turns holding off for a
  *  session whose terminal must never wait. */
 function holdSeconds() {
-  const raw = Number(process.env.CONTINUATION_REVIEW_HOLD ?? "1800");
-  return Number.isFinite(raw) && raw >= 0 ? raw : 1800;
+  const raw = Number(process.env.CONTINUATION_REVIEW_HOLD ?? "86400");
+  return Number.isFinite(raw) && raw >= 0 ? raw : 86400;
 }
 
 /** A session that stopped is idle, and idle is a review item. When the

@@ -1129,7 +1129,8 @@ def cmd_review(args) -> int:
     if args.action == "wait":
         if not args.id:
             raise SystemExit("review wait requires an id")
-        deadline = time.time() + args.timeout
+        started = time.time()
+        deadline = started + args.timeout
         while True:
             row = conn.execute(
                 "SELECT status, decision FROM reviews WHERE id=?",
@@ -1143,7 +1144,10 @@ def cmd_review(args) -> int:
                 return 4
             if time.time() >= deadline:
                 return 3
-            time.sleep(0.5)
+            # Answers usually come while the human is looking, so poll
+            # briskly at first and settle down: a day-long hold must not
+            # wake twice a second for a day.
+            time.sleep(0.25 if time.time() - started < 60 else 2)
     # list
     rows = conn.execute(
         "SELECT * FROM reviews WHERE status='open' ORDER BY raised_at"
