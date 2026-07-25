@@ -41,6 +41,19 @@ def run_cli(cli: str, args: list, stdin: str | None = None,
         input=stdin, text=True, capture_output=True, timeout=timeout)
 
 
+def ensure_session(cli: str, session: str, cwd: str, source: str = "") -> None:
+    """Register the session on ANY event, not only SessionStart.
+
+    Claude Code dispatches SessionStart before a --plugin-dir plugin has
+    finished loading (observed 2026-07-26: the event never reaches the
+    hook, while every later event does), so presence has to heal itself
+    from whatever event arrives first. `session start` is an upsert and
+    keeps the original start time.
+    """
+    run_cli(cli, ["session", "start", "--session", session,
+                  "--cwd", cwd, "--source", source])
+
+
 def wait_seconds() -> float:
     try:
         return float(os.environ.get("CONTINUATION_REVIEW_WAIT", "300"))
@@ -130,12 +143,15 @@ def main() -> int:
     if not session:
         return 0
 
+    if event == "SessionEnd":
+        run_cli(cli, ["review", "clear", "--session", session])
+        run_cli(cli, ["session", "end", "--session", session])
+        return 0
+
+    # Everything else means the session is alive: make it discoverable.
+    ensure_session(cli, session, cwd, data.get("source", ""))
+
     if event == "SessionStart":
-        # The app discovers a supervised session the moment it starts or
-        # resumes, not only when it waits on the human.
-        run_cli(cli, ["session", "start", "--session", session,
-                      "--cwd", cwd,
-                      "--source", data.get("source", "")])
         run_cli(cli, ["review", "clear", "--session", session])
         return 0
     if event == "PreToolUse":
@@ -155,10 +171,6 @@ def main() -> int:
         return 0
     if event == "UserPromptSubmit":
         run_cli(cli, ["review", "clear", "--session", session])
-        return 0
-    if event == "SessionEnd":
-        run_cli(cli, ["review", "clear", "--session", session])
-        run_cli(cli, ["session", "end", "--session", session])
         return 0
     return 0
 

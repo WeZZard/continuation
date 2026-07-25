@@ -154,3 +154,31 @@ def test_resume_announces_the_same_session(cli, store):
     run_hook(store, {"hook_event_name": "SessionStart", "session_id": "sess-b",
                      "cwd": "/tmp/proj", "source": "resume"})
     assert [s["source"] for s in sessions(cli)] == ["resume"]
+
+
+def test_presence_heals_without_session_start(cli, store):
+    """Claude Code can dispatch SessionStart before a --plugin-dir plugin
+    has loaded, so any later event must make the session discoverable."""
+    run_hook(store, {"hook_event_name": "UserPromptSubmit",
+                     "session_id": "sess-heal", "cwd": "/tmp/heal"})
+    live = sessions(cli)
+    assert [s["session_ref"] for s in live] == ["sess-heal"]
+    assert live[0]["cwd"] == "/tmp/heal"
+
+    # A stop keeps the same session and adds its wait.
+    run_hook(store, {"hook_event_name": "Stop", "session_id": "sess-heal",
+                     "cwd": "/tmp/heal"})
+    assert len(sessions(cli)) == 1
+    assert [r["kind"] for r in open_reviews(cli)] == ["stopped"]
+
+    run_hook(store, {"hook_event_name": "SessionEnd",
+                     "session_id": "sess-heal"})
+    assert sessions(cli) == []
+    assert open_reviews(cli) == []
+
+
+def test_guarded_sessions_never_register(cli, store):
+    run_hook(store, {"hook_event_name": "UserPromptSubmit",
+                     "session_id": "sess-guard", "cwd": "/tmp"},
+             extra_env={"AGENTIC_TASK_ID": "task"})
+    assert sessions(cli) == []
