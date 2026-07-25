@@ -172,6 +172,14 @@ final class InstallerModel: ObservableObject {
 
     func uninstallClaude() { perform("Uninstall") { $0.unwireClaude() } }
     func uninstallPi() { perform("Uninstall") { $0.unwirePi() } }
+
+    func setClaudeEnabled(_ on: Bool) {
+        perform(on ? "Enable" : "Disable") { try $0.setClaudeEnabled(on); return true }
+    }
+
+    func setPiEnabled(_ on: Bool) {
+        perform(on ? "Enable" : "Disable") { try $0.setPiEnabled(on); return true }
+    }
 }
 
 struct AgentsSettingsView: View {
@@ -313,6 +321,7 @@ struct AgentsSettingsView: View {
                 },
                 install: model.installClaude,
                 uninstall: model.uninstallClaude,
+                setEnabled: model.setClaudeEnabled,
                 footnote: "New sessions pick up changes after restart.")
             agentRow(
                 logo: .pi,
@@ -326,6 +335,7 @@ struct AgentsSettingsView: View {
                 },
                 install: model.installPi,
                 uninstall: model.uninstallPi,
+                setEnabled: model.setPiEnabled,
                 footnote: nil)
             if let error = model.lastError {
                 HStack(spacing: 6) {
@@ -344,6 +354,7 @@ struct AgentsSettingsView: View {
                           wiringLine: (PluginWiring) -> String,
                           install: @escaping () -> Void,
                           uninstall: @escaping () -> Void,
+                          setEnabled: @escaping (Bool) -> Void,
                           footnote: String?) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
@@ -353,6 +364,17 @@ struct AgentsSettingsView: View {
                     Text(version).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
+                // The enable flag is agent-native configuration; it works
+                // for dev wiring too — it never moves the wiring.
+                if let enabled = status?.enabled {
+                    Toggle("Enabled", isOn: Binding(
+                        get: { enabled },
+                        set: { setEnabled($0) }))
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .labelsHidden()
+                        .disabled(!model.actionsAllowed || model.busy)
+                }
             }
             switch status?.wiring {
             case .none:

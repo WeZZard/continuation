@@ -4,10 +4,13 @@ import Foundation
 // plugin, nothing else — is embedded at Resources/payload and materialized
 // to ~/Library/Application Support/Continuation/. This module is the single
 // home of the install/update wiring so a future App Store helper can reuse
-// it. Reads are file-level; every mutation of agent state shells out to the
-// agent's own CLI (`claude` / `pi`) — the app never edits their settings
-// files directly. A wiring that points anywhere other than the materialized
-// payload is a development checkout and is never touched.
+// it. The split: reads come from the agents' state files; install/uninstall/
+// update go through the agents' own CLIs (their internal state — caches,
+// installed_plugins.json — is theirs alone to write); the enabled flag is
+// documented user configuration in each agent's settings.json, which the
+// app edits directly like any settings GUI. A wiring that points anywhere
+// other than the materialized payload is a development checkout: its
+// enable flag may be toggled, its wiring is never moved.
 
 public enum PluginWiring: Equatable, Sendable {
     case agentMissing
@@ -20,13 +23,17 @@ public struct AgentStatus: Equatable, Sendable {
     public let binaryPath: String?
     public let binaryVersion: String?
     public let wiring: PluginWiring
+    /// The agent-native enable flag; nil when the agent has no entry.
+    public let enabled: Bool?
 
     public var detected: Bool { binaryPath != nil }
 
-    public init(binaryPath: String?, binaryVersion: String?, wiring: PluginWiring) {
+    public init(binaryPath: String?, binaryVersion: String?, wiring: PluginWiring,
+                enabled: Bool? = nil) {
         self.binaryPath = binaryPath
         self.binaryVersion = binaryVersion
         self.wiring = wiring
+        self.enabled = enabled
     }
 }
 
@@ -105,8 +112,45 @@ public enum InstallerFacts {
                                 payloadDir: URL) -> PluginWiring {
         guard let data = settingsJSON,
               let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let packages = root["packages"] as? [Any] else { return .notInstalled }
-        for package in packages {
+              let packages = root["packages"] as? [Any],
+              let entry = piContinuationEntry(packages: packages, agentDir: agentDir)
+        else { return .notInstalled }
+        let ours = payloadDir.appendingPathComponent("plugins/continuation")
+            .standardizedFileURL.path
+        return entry.path == ours
+            ? .installed(version: nil)
+            : .devCheckout(path: entry.path)
+    }
+
+    /// The Claude enable flag: the value under `enabledPlugins`, a
+    /// documented settings.json key. nil = no entry.
+    public static func claudeEnabled(settingsJSON: Data?) -> Bool? {
+        guard let data = settingsJSON,
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let plugins = root["enabledPlugins"] as? [String: Any] else { return nil }
+        return plugins["continuation@continuation"] as? Bool
+    }
+
+    /// The pi enable flag: a package entry may be an object carrying
+    /// per-resource patterns, and `"skills": []` disables every skill the
+    /// package provides (what `pi config` itself writes). A plain string
+    /// entry is fully enabled. nil = no entry.
+    public static func piEnabled(settingsJSON: Data?, agentDir: URL) -> Bool? {
+        guard let data = settingsJSON,
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let packages = root["packages"] as? [Any],
+              let entry = piContinuationEntry(packages: packages, agentDir: agentDir)
+        else { return nil }
+        guard let object = entry.raw as? [String: Any],
+              let skills = object["skills"] as? [Any] else { return true }
+        return !skills.isEmpty
+    }
+
+    /// The continuation package entry in a pi `packages` array, with its
+    /// source path resolved against the agent dir.
+    static func piContinuationEntry(packages: [Any],
+                                    agentDir: URL) -> (raw: Any, index: Int, path: String)? {
+        for (index, package) in packages.enumerated() {
             var source = package as? String
             if source == nil, let object = package as? [String: Any] {
                 source = object["source"] as? String
@@ -126,13 +170,9 @@ public enum InstallerFacts {
             }
             let standardized = resolved.standardizedFileURL.path
             guard standardized.hasSuffix("/plugins/continuation") else { continue }
-            let ours = payloadDir.appendingPathComponent("plugins/continuation")
-                .standardizedFileURL.path
-            return standardized == ours
-                ? .installed(version: nil)
-                : .devCheckout(path: standardized)
+            return (package, index, standardized)
         }
-        return .notInstalled
+        return nil
     }
 }
 
@@ -218,11 +258,14 @@ public final class InstallerEngine {
             claude: AgentStatus(
                 binaryPath: claudeBinary,
                 binaryVersion: claudeBinary.flatMap { toolVersion($0) },
-                wiring: claudeWiring),
+                wiring: claudeWiring,
+                enabled: InstallerFacts.claudeEnabled(settingsJSON: claudeSettings)),
             pi: AgentStatus(
                 binaryPath: piBinary,
                 binaryVersion: piBinary.flatMap { toolVersion($0) },
-                wiring: piWiring))
+                wiring: piWiring,
+                enabled: InstallerFacts.piEnabled(settingsJSON: piSettings,
+                                                  agentDir: paths.piAgentDir)))
     }
 
     // ------------------------------------------------------------- actions
@@ -282,6 +325,48 @@ public final class InstallerEngine {
         let ok = shell("claude plugin uninstall continuation@continuation").status == 0
         _ = shell("claude plugin marketplace remove continuation")
         return ok
+    }
+
+    /// Flip the documented `enabledPlugins` flag in Claude's settings.json.
+    /// JSONSerialization rewrites the file sorted — the same treatment
+    /// `claude plugin install` already gives it.
+    public func setClaudeEnabled(_ on: Bool) throws {
+        let url = paths.claudeSettings
+        var root = (try? JSONSerialization.jsonObject(
+            with: Data(contentsOf: url))) as? [String: Any] ?? [:]
+        var plugins = root["enabledPlugins"] as? [String: Any] ?? [:]
+        plugins["continuation@continuation"] = on
+        root["enabledPlugins"] = plugins
+        try JSONSerialization.data(withJSONObject: root,
+                                   options: [.prettyPrinted, .sortedKeys])
+            .write(to: url, options: .atomic)
+        note("claude enabledPlugins[continuation@continuation] → \(on)")
+    }
+
+    /// Flip the pi package's skills on or off: `"skills": []` on the
+    /// package entry disables them (pi's own config format); a plain
+    /// string entry enables everything.
+    public func setPiEnabled(_ on: Bool) throws {
+        let url = paths.piAgentDir.appendingPathComponent("settings.json")
+        var root = (try? JSONSerialization.jsonObject(
+            with: Data(contentsOf: url))) as? [String: Any] ?? [:]
+        var packages = root["packages"] as? [Any] ?? []
+        guard let entry = InstallerFacts.piContinuationEntry(
+            packages: packages, agentDir: paths.piAgentDir) else {
+            note("pi: no continuation package entry to toggle")
+            return
+        }
+        var source = entry.raw as? String
+        if source == nil, let object = entry.raw as? [String: Any] {
+            source = object["source"] as? String
+        }
+        guard let source else { return }
+        packages[entry.index] = on ? source : ["source": source, "skills": [Any]()]
+        root["packages"] = packages
+        try JSONSerialization.data(withJSONObject: root,
+                                   options: [.prettyPrinted, .sortedKeys])
+            .write(to: url, options: .atomic)
+        note("pi package skills → \(on ? "enabled" : "disabled")")
     }
 
     @discardableResult

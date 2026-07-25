@@ -104,3 +104,60 @@ final class InstallerTests: XCTestCase {
             .notInstalled)
     }
 }
+
+extension InstallerTests {
+
+    func testClaudeEnabledFlagParses() {
+        let on = Data(#"{"enabledPlugins": {"continuation@continuation": true}}"#.utf8)
+        let off = Data(#"{"enabledPlugins": {"continuation@continuation": false}}"#.utf8)
+        XCTAssertEqual(InstallerFacts.claudeEnabled(settingsJSON: on), true)
+        XCTAssertEqual(InstallerFacts.claudeEnabled(settingsJSON: off), false)
+        XCTAssertNil(InstallerFacts.claudeEnabled(settingsJSON: Data("{}".utf8)))
+    }
+
+    func testPiEnabledFlagParses() {
+        let agentDir = URL(fileURLWithPath: "/Users/u/.pi/agent")
+        let plain = Data(#"{"packages": ["/x/plugins/continuation"]}"#.utf8)
+        let disabled = Data(#"{"packages": [{"source": "/x/plugins/continuation", "skills": []}]}"#.utf8)
+        XCTAssertEqual(InstallerFacts.piEnabled(settingsJSON: plain, agentDir: agentDir), true)
+        XCTAssertEqual(InstallerFacts.piEnabled(settingsJSON: disabled, agentDir: agentDir), false)
+        XCTAssertNil(InstallerFacts.piEnabled(settingsJSON: Data("{}".utf8), agentDir: agentDir))
+    }
+
+    func testEngineTogglesBothSettingsFiles() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("installer-toggle-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: dir.appendingPathComponent("pi-agent"), withIntermediateDirectories: true)
+        let claudeSettings = dir.appendingPathComponent("claude-settings.json")
+        let piSettings = dir.appendingPathComponent("pi-agent/settings.json")
+        try Data(#"{"model": "fable", "enabledPlugins": {"continuation@continuation": true}}"#.utf8)
+            .write(to: claudeSettings)
+        try Data(#"{"packages": ["/x/plugins/continuation"]}"#.utf8).write(to: piSettings)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        var paths = InstallerEngine.Paths.standard()
+        paths.claudeSettings = claudeSettings
+        paths.piAgentDir = dir.appendingPathComponent("pi-agent")
+        let engine = InstallerEngine(paths: paths)
+
+        try engine.setClaudeEnabled(false)
+        XCTAssertEqual(
+            InstallerFacts.claudeEnabled(settingsJSON: try Data(contentsOf: claudeSettings)),
+            false)
+        // Unrelated keys survive the rewrite.
+        let root = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: claudeSettings)) as? [String: Any]
+        XCTAssertEqual(root?["model"] as? String, "fable")
+
+        let agentDir = paths.piAgentDir
+        try engine.setPiEnabled(false)
+        XCTAssertEqual(
+            InstallerFacts.piEnabled(settingsJSON: try Data(contentsOf: piSettings),
+                                     agentDir: agentDir), false)
+        try engine.setPiEnabled(true)
+        XCTAssertEqual(
+            InstallerFacts.piEnabled(settingsJSON: try Data(contentsOf: piSettings),
+                                     agentDir: agentDir), true)
+    }
+}
