@@ -10,6 +10,15 @@ struct ContinuationsApp: App {
             RootView()
                 .environmentObject(store)
                 .frame(minWidth: 900, minHeight: 540)
+                .task {
+                    // Sessions run the materialized CLI and plugin, so an
+                    // updated app that leaves them behind ships a version
+                    // skew into other people's terminals.
+                    let engine = InstallerEngine()
+                    await Task.detached(priority: .utility) {
+                        engine.refreshPayloadIfStale()
+                    }.value
+                }
         }
         #if os(macOS)
         MenuBarExtra {

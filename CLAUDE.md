@@ -49,3 +49,8 @@ it carries the current state, pending work, and the settled design rulings.
 - Probe a hook end to end with `CONTINUATION_HOOK_LOG=/tmp/x`; launch the
   probe with stdin held open (`sleep 30 | script -q /dev/null claude …`),
   since an immediate EOF declines whatever dialog is waiting.
+- The CLI and console plugin that sessions actually run are the copies
+  materialized under Application Support, not the repo — the app
+  refreshes them on launch when its payload changes. After editing
+  either, redeploy (`app/scripts/run-debug.sh`) before testing against a
+  real session, or you are testing a version skew.

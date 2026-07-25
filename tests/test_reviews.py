@@ -1,6 +1,7 @@
 """The review console channel: raise → wait → answer/clear round trips."""
 
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -147,3 +148,114 @@ def test_serve_reads_a_store_whose_wal_needs_recovery(cli, store, tmp_path):
     # Whatever state that left, serve's reader must still answer.
     listing = json.loads(cli("session", "list").stdout)["sessions"]
     assert [s["session_ref"] for s in listing] == ["s-recover"]
+
+
+def dead_pid() -> int:
+    """A pid that certainly belongs to nothing: run something trivial and
+    wait for it to finish."""
+    import subprocess
+    proc = subprocess.Popen(["/usr/bin/true"])
+    proc.wait()
+    return proc.pid
+
+
+def test_a_killed_session_is_reaped_with_what_it_was_waiting_on(cli, store):
+    """A session ends by telling us; a killed one tells nobody. Its review
+    would otherwise sit in the box forever, asking on behalf of a process
+    that cannot answer."""
+    gone = dead_pid()
+    cli("session", "start", "--session", "s-dead", "--cwd", "/w/p",
+        "--pid", str(gone))
+    cli("review", "raise", "--session", "s-dead", "--kind", "stopped",
+        "--cwd", "/w/p", "--summary", "Waiting for your next message")
+
+    assert json.loads(cli("review", "list").stdout)["reviews"] != []
+    reaped = int(cli("session", "reap").stdout.strip())
+
+    assert reaped == 1
+    assert json.loads(cli("session", "list").stdout)["sessions"] == []
+    assert json.loads(cli("review", "list").stdout)["reviews"] == []
+
+
+def test_a_live_session_survives_the_reaper(cli, store):
+    cli("session", "start", "--session", "s-live", "--cwd", "/w/p",
+        "--pid", str(os.getpid()))
+    assert int(cli("session", "reap").stdout.strip()) == 0
+    listing = json.loads(cli("session", "list").stdout)["sessions"]
+    assert [s["session_ref"] for s in listing] == ["s-live"]
+
+
+def test_a_session_without_a_pid_is_left_alone(cli, store):
+    """Silence about liveness is not evidence of death: a plugin too old
+    to report a pid still gets to be present."""
+    cli("session", "start", "--session", "s-quiet", "--cwd", "/w/p")
+    assert int(cli("session", "reap").stdout.strip()) == 0
+    listing = json.loads(cli("session", "list").stdout)["sessions"]
+    assert [s["session_ref"] for s in listing] == ["s-quiet"]
+
+
+def test_listing_buries_the_dead_it_walks_past(cli, store):
+    """The CLI is the writer, so listing is where a dead session is
+    actually put to rest rather than merely hidden."""
+    gone = dead_pid()
+    cli("session", "start", "--session", "s-walk", "--cwd", "/w/p",
+        "--pid", str(gone))
+    assert json.loads(cli("session", "list").stdout)["sessions"] == []
+    # Ended for real, not filtered out of one query.
+    assert int(cli("session", "reap").stdout.strip()) == 0
+
+
+def test_a_zombie_counts_as_dead(cli, store):
+    """A killed agent whose parent never collects it keeps answering
+    signals. That pid is not a session anyone can talk to."""
+    import subprocess
+    child = subprocess.Popen(["/usr/bin/true"])
+    # Deliberately not waited on: the process exits and stays a zombie.
+    time.sleep(0.5)
+    state = subprocess.run(["/bin/ps", "-o", "stat=", "-p", str(child.pid)],
+                           capture_output=True, text=True).stdout.strip()
+    assert state.startswith("Z"), f"expected a zombie, got {state!r}"
+    # And the kernel still accepts signal 0 for it, which is the trap.
+    os.kill(child.pid, 0)
+
+    cli("session", "start", "--session", "s-zombie", "--cwd", "/w/p",
+        "--pid", str(child.pid))
+    cli("review", "raise", "--session", "s-zombie", "--kind", "stopped",
+        "--cwd", "/w/p", "--summary", "Waiting for your next message")
+
+    assert int(cli("session", "reap").stdout.strip()) == 1
+    assert json.loads(cli("session", "list").stdout)["sessions"] == []
+    assert json.loads(cli("review", "list").stdout)["reviews"] == []
+    child.wait()
+
+
+def test_a_killed_session_whose_parent_lingers_counts_as_dead(cli, store):
+    """What a SIGKILLed agent actually looks like on macOS: not the
+    textbook Z, but state `?Es` — trying to exit, parent not yet
+    collecting. It answers signal 0 the whole time."""
+    import pty
+    import signal
+    child, fd = pty.fork()
+    if child == 0:
+        os.execv("/bin/cat", ["/bin/cat"])       # blocks on the pty
+    time.sleep(0.5)
+    os.kill(child, signal.SIGKILL)
+    time.sleep(0.5)
+
+    state = subprocess.run(["/bin/ps", "-o", "stat=", "-p", str(child)],
+                           capture_output=True, text=True).stdout.strip()
+    assert state, "expected the pid to still be listed"
+    os.kill(child, 0)                            # still answers signals
+
+    cli("session", "start", "--session", "s-exiting", "--cwd", "/w/p",
+        "--pid", str(child))
+    cli("review", "raise", "--session", "s-exiting", "--kind", "stopped",
+        "--cwd", "/w/p", "--summary", "Waiting for your next message")
+
+    assert int(cli("session", "reap").stdout.strip()) == 1
+    assert json.loads(cli("review", "list").stdout)["reviews"] == []
+    os.close(fd)
+    try:
+        os.waitpid(child, 0)
+    except ChildProcessError:
+        pass

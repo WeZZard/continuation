@@ -358,7 +358,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   source TEXT NOT NULL DEFAULT '',
   started_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  ended_at TEXT
+  ended_at TEXT,
+  pid INTEGER
 );
 CREATE INDEX IF NOT EXISTS sessions_live ON sessions (ended_at);
 """
@@ -371,7 +372,56 @@ def db() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=30000")
     conn.executescript(DB_SCHEMA)
+    # Stores written before sessions carried a pid: add the column rather
+    # than rebuild, since the rows themselves are still good.
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
+    if "pid" not in columns:
+        conn.execute("ALTER TABLE sessions ADD COLUMN pid INTEGER")
     return conn
+
+
+def dead_pids(pids) -> set:
+    """Which of these agent processes are gone.
+
+    A session ends by telling us (SessionEnd), but a killed process tells
+    nobody, and a review nobody can answer is a lie the box would keep
+    repeating. Signal 0 is not enough on its own: a process that has
+    exited but whose parent has not collected it is a zombie, and the
+    kernel still accepts signals for it — the agent is as dead as it gets
+    while the pid answers. So ask ps for the state instead, in one call
+    for every session at once. When ps cannot tell us, nothing is
+    declared dead: silence about liveness is not evidence of death.
+    """
+    wanted = set()
+    for pid in pids:
+        try:
+            value = int(pid)
+        except (TypeError, ValueError):
+            continue
+        if value > 1:
+            wanted.add(value)
+    if not wanted:
+        return set()
+    try:
+        listing = subprocess.run(
+            ["/bin/ps", "-o", "pid=,stat=", "-p",
+             ",".join(str(pid) for pid in sorted(wanted))],
+            capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return set()
+    alive = set()
+    for line in listing.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        state = parts[1]
+        if not (state.startswith("Z") or "E" in state):
+            alive.add(pid)
+    return wanted - alive
 
 
 @contextmanager
@@ -1131,9 +1181,10 @@ def cmd_session(args) -> int:
             started = existing["started_at"] if existing else now
             conn.execute(
                 "INSERT OR REPLACE INTO sessions (session_ref, agent, cwd,"
-                " source, started_at, updated_at, ended_at)"
-                " VALUES (?,?,?,?,?,?,NULL)",
-                (args.session, args.agent, args.cwd, args.source, started, now))
+                " source, started_at, updated_at, ended_at, pid)"
+                " VALUES (?,?,?,?,?,?,NULL,?)",
+                (args.session, args.agent, args.cwd, args.source, started, now,
+                 args.pid or None))
             event(conn, "session.start", args.actor,
                   session_ref=args.session, source=args.source)
         return 0
@@ -1149,6 +1200,12 @@ def cmd_session(args) -> int:
             if changed:
                 event(conn, "session.end", args.actor, session_ref=args.session)
         return 0
+    if args.action == "reap":
+        print(reap_dead_sessions(conn, args.actor))
+        return 0
+    # Listing is a read, but the CLI is the writer, so it is also the
+    # right place to bury what the kernel says is already gone.
+    reap_dead_sessions(conn, args.actor)
     rows = conn.execute(
         "SELECT * FROM sessions WHERE ended_at IS NULL ORDER BY started_at"
     ).fetchall()
@@ -1157,7 +1214,52 @@ def cmd_session(args) -> int:
     return 0
 
 
+def dead_session_refs(conn: sqlite3.Connection) -> set:
+    """Sessions still marked live whose process is gone."""
+    try:
+        rows = conn.execute(
+            "SELECT session_ref, pid FROM sessions WHERE ended_at IS NULL"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return set()
+    gone = dead_pids(row["pid"] for row in rows)
+    return {row["session_ref"] for row in rows if row["pid"] in gone}
+
+
+def reap_dead_sessions(conn: sqlite3.Connection, actor: str) -> int:
+    """End sessions whose process is gone, and clear what they were
+    waiting on — a killed agent answers nothing. One transaction per
+    session: ending it and dropping its reviews is a single fact."""
+    reaped = 0
+    rows = conn.execute(
+        "SELECT session_ref, pid FROM sessions WHERE ended_at IS NULL"
+    ).fetchall()
+    gone = dead_pids(row["pid"] for row in rows)
+    for row in rows:
+        if row["pid"] not in gone:
+            continue
+        now = now_utc().isoformat()
+        with tx(conn):
+            conn.execute(
+                "UPDATE sessions SET ended_at=?, updated_at=?"
+                " WHERE session_ref=? AND ended_at IS NULL",
+                (now, now, row["session_ref"]))
+            open_ids = [r["id"] for r in conn.execute(
+                "SELECT id FROM reviews WHERE status='open' AND session_ref=?",
+                (row["session_ref"],)).fetchall()]
+            if open_ids:
+                conn.execute(
+                    "UPDATE reviews SET status='cleared', resolved_at=?"
+                    " WHERE status='open' AND session_ref=?",
+                    (now, row["session_ref"]))
+            event(conn, "session.reap", actor, session_ref=row["session_ref"],
+                  pid=row["pid"], review_ids=open_ids)
+        reaped += 1
+    return reaped
+
+
 def session_payload(row: sqlite3.Row) -> dict:
+    keys = row.keys()
     return {
         "session_ref": row["session_ref"],
         "agent": row["agent"],
@@ -1165,6 +1267,8 @@ def session_payload(row: sqlite3.Row) -> dict:
         "source": row["source"],
         "started_at": row["started_at"],
         "updated_at": row["updated_at"],
+        # Absent from stores written before sessions carried a process.
+        "pid": row["pid"] if "pid" in keys else None,
     }
 
 
@@ -1200,6 +1304,9 @@ def cmd_continue(args) -> int:
 
 def cmd_tick(args) -> int:
     conn = db()
+    # Sessions killed since the last tick are buried here, so the review
+    # box does not keep asking on behalf of a process that is gone.
+    reap_dead_sessions(conn, args.actor)
     evaluated = []
     for task in registered_tasks(conn):
         task_id = task["id"]
@@ -1788,11 +1895,15 @@ class NodeAPI(BaseHTTPRequestHandler):
                 rows = conn.execute(
                     "SELECT * FROM reviews WHERE status='open'"
                     " ORDER BY raised_at").fetchall()
+                dead = dead_session_refs(conn)
             except sqlite3.OperationalError:
                 # A store from before the reviews table; the next CLI
                 # write creates it.
                 return self._json({"reviews": []})
-        self._json({"reviews": [review_payload(row) for row in rows]})
+        # Reaping is the writer's job; serving is not going to repeat a
+        # dead session's request while it waits for the next tick.
+        self._json({"reviews": [review_payload(row) for row in rows
+                                if row["session_ref"] not in dead]})
 
     def _sessions(self) -> None:
         with readonly() as conn:
@@ -1802,7 +1913,9 @@ class NodeAPI(BaseHTTPRequestHandler):
                     " ORDER BY started_at").fetchall()
             except sqlite3.OperationalError:
                 return self._json({"sessions": []})
-        self._json({"sessions": [session_payload(row) for row in rows]})
+            gone = dead_pids(row["pid"] for row in rows)
+        self._json({"sessions": [session_payload(row) for row in rows
+                                 if row["pid"] not in gone]})
 
     def _node(self) -> None:
         with readonly() as conn:
@@ -2020,12 +2133,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(fn=cmd_authoring)
 
     p = sub.add_parser("session",
-                       help="Supervised sessions: start/end/list.")
-    p.add_argument("action", choices=("start", "end", "list"))
+                       help="Supervised sessions: start/end/list/reap.")
+    p.add_argument("action", choices=("start", "end", "list", "reap"))
     p.add_argument("--session", default="")
     p.add_argument("--agent", default="claude-code")
     p.add_argument("--cwd", default="")
     p.add_argument("--source", default="")
+    p.add_argument("--pid", type=int, default=0,
+                   help="The agent process this session belongs to; when it"
+                        " dies the session is reaped.")
     p.set_defaults(fn=cmd_session)
 
     p = sub.add_parser("review",

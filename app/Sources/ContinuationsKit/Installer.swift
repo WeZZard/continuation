@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 // The app's payload — the `continuation` command-line tool plus the agent
@@ -395,7 +396,62 @@ public final class InstallerEngine {
         if fm.fileExists(atPath: dest.path) { try fm.moveItem(at: dest, to: old) }
         try fm.moveItem(at: staging, to: dest)
         try? fm.removeItem(at: old)
+        try? payloadStamp.write(to: dest.appendingPathComponent(".version"),
+                                atomically: true, encoding: .utf8)
         note("materialized payload at \(dest.path)")
+    }
+
+    /// What this build calls itself. The materialized copy records it, so
+    /// a newer app can tell that what sessions actually run is older.
+    public static var bundleVersion: String {
+        let info = Bundle.main.infoDictionary
+        let short = info?["CFBundleShortVersionString"] as? String ?? "0"
+        let build = info?["CFBundleVersion"] as? String ?? "0"
+        return "\(short) (\(build))"
+    }
+
+    /// Version plus what the payload actually contains. Version alone is
+    /// not enough: a development build changes the CLI and the hooks far
+    /// more often than it changes its version number, and a stale copy
+    /// under an unchanged version is exactly the skew this guards.
+    var payloadStamp: String {
+        var parts: [String] = [Self.bundleVersion]
+        if let source = paths.payloadSource,
+           let walker = FileManager.default.enumerator(
+            at: source, includingPropertiesForKeys: [.fileSizeKey,
+                                                     .contentModificationDateKey]) {
+            var entries: [String] = []
+            for case let url as URL in walker {
+                let values = try? url.resourceValues(
+                    forKeys: [.fileSizeKey, .contentModificationDateKey])
+                let size = values?.fileSize ?? 0
+                let stamp = values?.contentModificationDate?
+                    .timeIntervalSince1970 ?? 0
+                entries.append("\(url.lastPathComponent):\(size):\(Int(stamp))")
+            }
+            let digest = SHA256.hash(data: Data(entries.sorted()
+                                                 .joined().utf8))
+            parts.append(digest.compactMap { String(format: "%02x", $0) }
+                .joined().prefix(16).description)
+        }
+        return parts.joined(separator: " ")
+    }
+
+    /// The CLI on PATH and the plugin injected into sessions are the
+    /// materialized copies, not the ones inside the bundle — so an app
+    /// that updates without refreshing them leaves sessions running last
+    /// version's code against this version's app. Refresh on launch when
+    /// the two disagree; a matching version copies nothing.
+    public func refreshPayloadIfStale() {
+        let marker = paths.payloadDest.appendingPathComponent(".version")
+        let materialized = try? String(contentsOf: marker, encoding: .utf8)
+        guard materialized != payloadStamp else { return }
+        do {
+            try materialize()
+            try? linkCLI()
+        } catch {
+            note("payload refresh failed: \(error.localizedDescription)")
+        }
     }
 
     public func linkCLI() throws {

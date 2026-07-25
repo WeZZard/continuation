@@ -243,3 +243,25 @@ def test_reads_write_nothing(server, cli):
     get_status(server["base"], "/v1/nope")
     after = get_json(server["base"], "/v1/log?after=0&limit=1000")["events"]
     assert len(after) == len(before)  # request handling never writes
+
+
+def test_serve_hides_a_session_whose_process_is_gone(server, cli):
+    """Serve writes nothing, so it cannot reap — but it will not repeat a
+    dead session's request while waiting for the next tick either."""
+    proc = subprocess.Popen(["/usr/bin/true"])
+    proc.wait()
+
+    cli("session", "start", "--session", "s-live", "--cwd", "/w/live",
+        "--pid", str(os.getpid()))
+    cli("session", "start", "--session", "s-gone", "--cwd", "/w/gone",
+        "--pid", str(proc.pid))
+    cli("review", "raise", "--session", "s-gone", "--kind", "stopped",
+        "--cwd", "/w/gone", "--summary", "Waiting for your next message")
+    cli("review", "raise", "--session", "s-live", "--kind", "stopped",
+        "--cwd", "/w/live", "--summary", "Waiting for your next message")
+
+    sessions = get_json(server["base"], "/v1/sessions")["sessions"]
+    assert [s["session_ref"] for s in sessions] == ["s-live"]
+
+    reviews = get_json(server["base"], "/v1/reviews")["reviews"]
+    assert [r["session_ref"] for r in reviews] == ["s-live"]

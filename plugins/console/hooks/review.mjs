@@ -143,12 +143,26 @@ function emit(permission, reason) {
   }));
 }
 
+/** The agent process this hook belongs to. A killed session announces
+ *  nothing, so the pid is what lets the store bury it: Claude Code sets
+ *  CLAUDE_PID, and is our parent when it does not. */
+function agentPID() {
+  const declared = Number(process.env.CLAUDE_PID);
+  if (Number.isInteger(declared) && declared > 1) return declared;
+  return Number.isInteger(process.ppid) && process.ppid > 1 ? process.ppid : 0;
+}
+
 /** Register the session on ANY event, not only SessionStart: Claude Code
  *  dispatches SessionStart before a --plugin-dir plugin has loaded, so
  *  presence heals from whatever event arrives first. */
 function ensureSession(cli, session, cwd, source) {
-  runCLI(cli, ["session", "start", "--session", session,
-               "--cwd", cwd, "--source", source ?? ""]);
+  const base = ["session", "start", "--session", session,
+                "--cwd", cwd, "--source", source ?? ""];
+  const started = runCLI(cli, [...base, "--pid", String(agentPID())]);
+  // A CLI older than --pid would otherwise leave the session
+  // unregistered and its reviews orphaned. Presence first; being
+  // reapable is the improvement, not the requirement.
+  if (started.status !== 0) runCLI(cli, base);
 }
 
 function preToolUse(cli, data, session, cwd) {

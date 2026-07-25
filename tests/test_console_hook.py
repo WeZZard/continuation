@@ -278,3 +278,14 @@ def test_a_cleared_hold_leaves_the_queue(cli, store):
     thread.join()
     assert result.stdout.strip() == ""
     assert open_reviews(cli) == []
+
+
+def test_the_hook_names_the_process_its_session_belongs_to(cli, store):
+    """The pid is how a killed session gets buried: nothing else about a
+    kill reaches the store."""
+    run_hook(store, {"hook_event_name": "Stop",
+                     "session_id": "sess-pid", "cwd": "/tmp/p"},
+             extra_env={"CLAUDE_PID": str(os.getpid())}, timeout=15)
+    sessions = json.loads(cli("session", "list").stdout)["sessions"]
+    assert [s["session_ref"] for s in sessions] == ["sess-pid"]
+    assert sessions[0]["pid"] == os.getpid()

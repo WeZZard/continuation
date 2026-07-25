@@ -223,6 +223,16 @@ row keeps its own. Selecting one opens its console: answer its
 questions (single or multi-select, or write your own), approve its plan
 or send it back with feedback, or send the session its next message.
 
+A session leaves the box when it ends — `SessionEnd` clears its items —
+and when its process dies without saying so. The hook records the agent's
+pid, `serve` hides sessions whose process is gone, and the CLI buries
+them for real on `session reap`, on `tick`, and whenever it lists. Death
+is read from `ps`, not from signal 0: a killed agent whose parent has not
+collected it still answers signals, showing `Z` or an `E` ("trying to
+exit") flag while being as gone as it gets. A session from a plugin too
+old to report a pid is left alone — silence about liveness is not
+evidence of death.
+
 Sending a message needs the session to be **held**, which is opt-in:
 `CONTINUATION_REVIEW_HOLD=<seconds>` (the Agent settings panel writes it
 into the launch command). A held session's `Stop` hook stays alive
