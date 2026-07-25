@@ -111,3 +111,39 @@ def test_sessions_and_reviews_are_independent(cli, store):
     cli("review", "clear", "--session", "s-2")
     assert json.loads(cli("review", "list").stdout)["reviews"] == []
     assert len(json.loads(cli("session", "list").stdout)["sessions"]) == 1
+
+
+def test_serve_reads_a_store_whose_wal_needs_recovery(cli, store, tmp_path):
+    """A writer killed mid-write leaves a WAL that only a writable open
+    can replay; a read-only open fails until then. Serve must recover
+    rather than drop the node off the fleet."""
+    import signal
+    import sqlite3
+    import subprocess
+    import sys
+    import time
+
+    cli("session", "start", "--session", "s-recover", "--cwd", "/tmp")
+    db_path = store / "store.db"
+
+    # A writer that holds an uncommitted WAL and dies without closing.
+    script = tmp_path / "killer.py"
+    script.write_text(
+        "import sqlite3, sys, time\n"
+        f"c = sqlite3.connect({str(db_path)!r}, isolation_level=None)\n"
+        "c.execute('PRAGMA journal_mode=WAL')\n"
+        "c.execute('BEGIN')\n"
+        "c.execute(\"INSERT INTO sessions (session_ref, agent, cwd, source,"
+        " started_at, updated_at) VALUES ('x','a','','', '1','1')\")\n"
+        "print('ready', flush=True)\n"
+        "time.sleep(30)\n")
+    proc = subprocess.Popen([sys.executable, str(script)],
+                            stdout=subprocess.PIPE, text=True)
+    proc.stdout.readline()
+    proc.send_signal(signal.SIGKILL)
+    proc.wait()
+    time.sleep(0.2)
+
+    # Whatever state that left, serve's reader must still answer.
+    listing = json.loads(cli("session", "list").stdout)["sessions"]
+    assert [s["session_ref"] for s in listing] == ["s-recover"]

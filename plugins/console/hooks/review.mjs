@@ -184,7 +184,13 @@ async function main() {
 
   switch (event) {
     case "SessionStart":
+      // A session that has just started or resumed is idle: it is
+      // waiting for the human to push it into work, which is exactly
+      // what the review box is for.
       runCLI(cli, ["review", "clear", "--session", session]);
+      runCLI(cli, ["review", "raise", "--session", session,
+                   "--kind", "stopped", "--cwd", cwd,
+                   "--summary", "Waiting for your first message"]);
       return;
     case "PreToolUse":
       preToolUse(cli, data, session, cwd);

@@ -145,9 +145,24 @@ def test_session_start_announces_and_end_retires(cli, store):
     live = sessions(cli)
     assert [s["session_ref"] for s in live] == ["sess-a"]
     assert live[0]["source"] == "startup"
+    # A started session is idle: it waits for the human, so it is IN the
+    # review box from the moment it starts.
+    assert [r["kind"] for r in open_reviews(cli)] == ["stopped"]
+    assert open_reviews(cli)[0]["summary"] == "Waiting for your first message"
 
     run_hook(store, {"hook_event_name": "SessionEnd", "session_id": "sess-a"})
     assert sessions(cli) == []
+    assert open_reviews(cli) == []
+
+
+def test_first_prompt_clears_the_idle_wait(cli, store):
+    run_hook(store, {"hook_event_name": "SessionStart", "session_id": "sess-i",
+                     "cwd": "/tmp/proj", "source": "startup"})
+    assert len(open_reviews(cli)) == 1
+    run_hook(store, {"hook_event_name": "UserPromptSubmit",
+                     "session_id": "sess-i", "cwd": "/tmp/proj"})
+    assert open_reviews(cli) == []          # the human pushed it to work
+    assert len(sessions(cli)) == 1          # still discovered
 
 
 def test_resume_announces_the_same_session(cli, store):

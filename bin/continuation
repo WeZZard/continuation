@@ -384,7 +384,18 @@ def readonly():
     serve daemon did exactly that and dropped off the fleet while the CLI
     kept working (2026-07-26).
     """
-    conn = db_readonly()
+    try:
+        conn = db_readonly()
+    except sqlite3.OperationalError:
+        # A WAL store whose log needs replay cannot be opened read-only —
+        # only a writable open can recover it, and SQLite does that on
+        # open. A writer killed mid-write leaves exactly this state, and
+        # it took the node offline while the CLI kept working
+        # (2026-07-26). Recover, write nothing, then read.
+        recovery = sqlite3.connect(STORE / "store.db", timeout=5)
+        recovery.execute("PRAGMA quick_check").fetchone()
+        recovery.close()
+        conn = db_readonly()
     try:
         yield conn
     finally:

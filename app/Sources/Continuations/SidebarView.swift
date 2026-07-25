@@ -65,10 +65,10 @@ struct SidebarView: View {
                 Label("Activity", systemImage: "waveform.path.ecg")
                     .tag(SidebarSelection.activity)
             }
-            // Supervised sessions — discovered when they start, whether
-            // they are waiting on you or merely running.
+            // Supervised sessions: idle ones are waiting on you and open
+            // the console; busy ones state their presence.
             if !store.sessionRows.isEmpty || !store.orphanReviewRows.isEmpty {
-                Section("Sessions") {
+                Section("Review") {
                     ForEach(store.sessionRows, id: \.session.id) { row in
                         sessionRow(nodeKey: row.nodeKey, nodeName: row.nodeName,
                                    project: projectName(row.session.cwd),
