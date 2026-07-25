@@ -63,6 +63,11 @@ public final class FleetStore: ObservableObject {
     private var loops: [String: Task<Void, Never>] = [:]
     private var cancellables: Set<AnyCancellable> = []
 
+    /// Removals must outlive the next Bonjour tick: a deduped or
+    /// user-removed discovered node stays gone instead of being re-added
+    /// by the standing services list.
+    private var suppressedKeys: Set<String> = []
+
     /// Events that change what a queue view shows; anything else is audit.
     private static let refreshingCommands: Set<String> = [
         "register", "unregister", "continue", "migrate", "tick",
@@ -110,9 +115,14 @@ public final class FleetStore: ObservableObject {
         loops[key] = nil
         nodes.removeAll { $0.key == key }
         persistence.deleteSnapshot(key: key)
+        if key.hasPrefix("bonjour:") {
+            suppressedKeys.insert(key)
+        }
         if key.hasPrefix("manual:") {
             let remaining = persistence.loadManualNodes().filter { $0.key != key }
             persistence.saveManualNodes(remaining)
+            // A removed manual node may free its discovered face.
+            suppressedKeys.removeAll()
         }
     }
 
@@ -185,6 +195,7 @@ public final class FleetStore: ObservableObject {
 
     private func upsert(key: String, source: NodeSource, url: URL,
                         fallbackName: String) {
+        guard !suppressedKeys.contains(key) else { return }
         if let index = nodes.firstIndex(where: { $0.key == key }) {
             if nodes[index].url != url {
                 nodes[index].url = url

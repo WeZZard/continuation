@@ -2,10 +2,14 @@ import ContinuationsKit
 import SwiftUI
 
 struct SettingsView: View {
+    @StateObject private var installer = InstallerModel()
+
     var body: some View {
         TabView {
-            AgentsSettingsView()
-                .tabItem { Label("Agents", systemImage: "puzzlepiece.extension") }
+            GeneralSettingsView(model: installer)
+                .tabItem { Label("General", systemImage: "gearshape") }
+            CLISettingsView(model: installer)
+                .tabItem { Label("CLI", systemImage: "terminal") }
             NodesSettingsView()
                 .tabItem { Label("Nodes", systemImage: "point.3.connected.trianglepath.dotted") }
         }
@@ -173,10 +177,24 @@ final class InstallerModel: ObservableObject {
         perform("Uninstall") { $0.unwirePi(sourcePath: wiredPath) }
     }
 
+    func installCLI() {
+        perform("Install") { engine in
+            try engine.materialize()
+            try engine.linkCLI()
+            return true
+        }
+    }
+
+    func uninstallCLI() {
+        perform("Uninstall") { engine in
+            try engine.unlinkCLI()
+            return true
+        }
+    }
 }
 
-struct AgentsSettingsView: View {
-    @StateObject private var model = InstallerModel()
+struct GeneralSettingsView: View {
+    @ObservedObject var model: InstallerModel
     @State private var confirmUninstall: AgentLogo?
     @State private var revealsLocation: Set<AgentLogo> = []
 
@@ -193,7 +211,6 @@ struct AgentsSettingsView: View {
         VStack(spacing: 0) {
             if showsBanner { bannerView }
             Form {
-                commandLineSection
                 agentSections
             }
             .formStyle(.grouped)
@@ -269,46 +286,6 @@ struct AgentsSettingsView: View {
         let installed = model.snapshot?.installedCLIVersion
             ?? model.snapshot?.installedPluginVersion ?? "?"
         return "Update available — this app carries \(bundled); this Mac runs \(installed)."
-    }
-
-    // ------------------------------------------------- command-line tool
-
-    @ViewBuilder private var commandLineSection: some View {
-        Section("Command-Line Tool") {
-            LabeledContent("Bundled with this app") {
-                Text(model.snapshot?.bundledCLIVersion ?? "—")
-            }
-            LabeledContent("Installed on this Mac") {
-                if let version = model.snapshot?.installedCLIVersion {
-                    HStack(spacing: 6) {
-                        Text(version)
-                        if version == model.snapshot?.bundledCLIVersion {
-                            StatusMark(ok: true, text: "current")
-                        } else {
-                            Text("↑ will update").foregroundStyle(.blue)
-                        }
-                    }
-                } else {
-                    Text("not installed").foregroundStyle(.secondary)
-                }
-            }
-            if model.snapshot?.installedCLIVersion != nil,
-               let dir = model.snapshot?.payloadDir {
-                Text(abbreviate(dir))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            LabeledContent("On PATH") {
-                if let path = model.snapshot?.cliOnPath {
-                    HStack(spacing: 6) {
-                        StatusMark(ok: true, text: nil)
-                        Text(abbreviate(path)).font(.caption)
-                    }
-                } else {
-                    Text("not on PATH").foregroundStyle(.secondary)
-                }
-            }
-        }
     }
 
     // ------------------------------------------------------- agent rows
@@ -427,13 +404,6 @@ struct AgentsSettingsView: View {
         }
     }
 
-    private func abbreviate(_ path: String) -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return path.hasPrefix(home)
-            ? "~" + path.dropFirst(home.count)
-            : path
-    }
-
     // ---------------------------------------------------------------- log
 
     private var logSheet: some View {
@@ -453,6 +423,91 @@ struct AgentsSettingsView: View {
         }
         .padding(16)
         .frame(width: 520, height: 360)
+    }
+}
+
+private func abbreviate(_ path: String) -> String {
+    let home = FileManager.default.homeDirectoryForCurrentUser.path
+    return path.hasPrefix(home)
+        ? "~" + path.dropFirst(home.count)
+        : path
+}
+
+/// The CLI panel: the command's state, and one button — Install when the
+/// command is absent from PATH, Uninstall when present.
+struct CLISettingsView: View {
+    @ObservedObject var model: InstallerModel
+    @State private var confirmUninstall = false
+
+    private var cliInstalled: Bool { model.snapshot?.cliOnPath != nil }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Form {
+                Section("Command-Line Tool") {
+                    LabeledContent("Bundled with this app") {
+                        Text(model.snapshot?.bundledCLIVersion ?? "—")
+                    }
+                    LabeledContent("Installed on this Mac") {
+                        if let version = model.snapshot?.installedCLIVersion {
+                            HStack(spacing: 6) {
+                                Text(version)
+                                if version == model.snapshot?.bundledCLIVersion {
+                                    StatusMark(ok: true, text: "current")
+                                } else {
+                                    Text("↑ will update").foregroundStyle(.blue)
+                                }
+                            }
+                        } else {
+                            Text("not installed").foregroundStyle(.secondary)
+                        }
+                    }
+                    if model.snapshot?.installedCLIVersion != nil,
+                       let dir = model.snapshot?.payloadDir {
+                        Text(abbreviate(dir))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    LabeledContent("On PATH") {
+                        if let path = model.snapshot?.cliOnPath {
+                            HStack(spacing: 6) {
+                                StatusMark(ok: true, text: nil)
+                                Text(abbreviate(path)).font(.caption)
+                            }
+                        } else {
+                            Text("not on PATH").foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            .formStyle(.grouped)
+            if let error = model.lastError {
+                Text(error).font(.caption).foregroundStyle(.red)
+                    .padding(.bottom, 6)
+            }
+            Button(cliInstalled ? "Uninstall" : "Install") {
+                if cliInstalled {
+                    confirmUninstall = true
+                } else {
+                    model.installCLI()
+                }
+            }
+            .disabled(model.busy
+                || (!cliInstalled && model.snapshot?.bundledCLIVersion == nil))
+            .padding(.bottom, 16)
+        }
+        .frame(height: 340)
+        .confirmationDialog(
+            "Uninstall the `continuation` command?",
+            isPresented: $confirmUninstall,
+            titleVisibility: .visible
+        ) {
+            Button("Uninstall", role: .destructive) { model.uninstallCLI() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Removes the command from PATH. No files are deleted.")
+        }
+        .onAppear { model.refresh() }
     }
 }
 

@@ -161,3 +161,32 @@ extension InstallerTests {
                                      agentDir: agentDir), true)
     }
 }
+
+extension InstallerTests {
+
+    func testLinkAndUnlinkCLIRoundTrip() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("installer-link-\(UUID().uuidString)")
+        let payloadBin = dir.appendingPathComponent("payload/bin")
+        try FileManager.default.createDirectory(at: payloadBin,
+                                                withIntermediateDirectories: true)
+        try Data("#!/usr/bin/env python3\n".utf8)
+            .write(to: payloadBin.appendingPathComponent("continuation"))
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        var paths = InstallerEngine.Paths.standard()
+        paths.payloadDest = dir.appendingPathComponent("payload")
+        paths.localBin = dir.appendingPathComponent("bin")
+        let engine = InstallerEngine(paths: paths)
+
+        try engine.linkCLI()
+        let link = paths.localBin.appendingPathComponent("continuation")
+        XCTAssertEqual(
+            try FileManager.default.destinationOfSymbolicLink(atPath: link.path),
+            paths.payloadDest.appendingPathComponent("bin/continuation").path)
+
+        try engine.unlinkCLI()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: link.path))
+        XCTAssertNoThrow(try engine.unlinkCLI())   // idempotent
+    }
+}

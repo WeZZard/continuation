@@ -327,6 +327,16 @@ public final class InstallerEngine {
         return ok
     }
 
+    public func unlinkCLI() throws {
+        let link = paths.localBin.appendingPathComponent("continuation")
+        do {
+            try FileManager.default.removeItem(at: link)
+            note("removed \(link.path)")
+        } catch CocoaError.fileNoSuchFile {
+            note("no CLI link to remove")
+        }
+    }
+
     /// Flip the documented `enabledPlugins` flag in Claude's settings.json.
     /// JSONSerialization rewrites the file sorted — the same treatment
     /// `claude plugin install` already gives it.
