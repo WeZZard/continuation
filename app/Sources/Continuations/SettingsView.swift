@@ -180,13 +180,6 @@ final class InstallerModel: ObservableObject {
         perform("Uninstall") { $0.unwirePi(sourcePath: wiredPath) }
     }
 
-    func setClaudeEnabled(_ on: Bool) {
-        perform(on ? "Enable" : "Disable") { try $0.setClaudeEnabled(on); return true }
-    }
-
-    func setPiEnabled(_ on: Bool) {
-        perform(on ? "Enable" : "Disable") { try $0.setPiEnabled(on); return true }
-    }
 }
 
 struct AgentsSettingsView: View {
@@ -347,7 +340,6 @@ struct AgentsSettingsView: View {
                     }
                 },
                 install: model.installClaude,
-                setEnabled: model.setClaudeEnabled,
                 footnote: "New sessions pick up changes after restart.")
             agentRow(
                 logo: .pi,
@@ -360,7 +352,6 @@ struct AgentsSettingsView: View {
                     return "continuation:schedule"
                 },
                 install: model.installPi,
-                setEnabled: model.setPiEnabled,
                 footnote: nil)
             if let error = model.lastError {
                 HStack(spacing: 6) {
@@ -378,7 +369,6 @@ struct AgentsSettingsView: View {
     private func agentRow(logo: AgentLogo, title: String, status: AgentStatus?,
                           wiringLine: (PluginWiring) -> String,
                           install: @escaping () -> Void,
-                          setEnabled: @escaping (Bool) -> Void,
                           footnote: String?) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
@@ -388,23 +378,6 @@ struct AgentsSettingsView: View {
                     Text(version).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                // The enable flag is agent-native configuration; it works
-                // for dev wiring too — it never moves the wiring. Install
-                // and uninstall are buttons below; this switch only mutes.
-                if let enabled = status?.enabled {
-                    Toggle(isOn: Binding(
-                        get: { enabled },
-                        set: { setEnabled($0) })) {
-                        Text("Active")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-                    .help("Whether new sessions load the plugin. "
-                          + "Installing and removing are buttons, not this switch.")
-                    .disabled(!model.actionsAllowed || model.busy)
-                }
             }
             switch status?.wiring {
             case .none:
