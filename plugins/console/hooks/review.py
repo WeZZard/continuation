@@ -130,6 +130,14 @@ def main() -> int:
     if not session:
         return 0
 
+    if event == "SessionStart":
+        # The app discovers a supervised session the moment it starts or
+        # resumes, not only when it waits on the human.
+        run_cli(cli, ["session", "start", "--session", session,
+                      "--cwd", cwd,
+                      "--source", data.get("source", "")])
+        run_cli(cli, ["review", "clear", "--session", session])
+        return 0
     if event == "PreToolUse":
         return pre_tool_use(cli, data, session, cwd)
     if event == "PostToolUse":
@@ -145,8 +153,12 @@ def main() -> int:
                       "--kind", "stopped", "--cwd", cwd,
                       "--summary", "Waiting for your next message"])
         return 0
-    if event in ("UserPromptSubmit", "SessionEnd"):
+    if event == "UserPromptSubmit":
         run_cli(cli, ["review", "clear", "--session", session])
+        return 0
+    if event == "SessionEnd":
+        run_cli(cli, ["review", "clear", "--session", session])
+        run_cli(cli, ["session", "end", "--session", session])
         return 0
     return 0
 

@@ -80,3 +80,34 @@ def test_answer_refuses_non_open(cli, store):
     cli("review", "answer", review_id, "--decision", "-", stdin="{}")
     cli("review", "answer", review_id, "--decision", "-", stdin="{}",
         expect=1)
+
+
+def test_session_start_is_discoverable_and_end_retires_it(cli, store):
+    cli("session", "start", "--session", "s-1", "--cwd", "/tmp/project",
+        "--source", "startup")
+    listing = json.loads(cli("session", "list").stdout)["sessions"]
+    assert [s["session_ref"] for s in listing] == ["s-1"]
+    assert listing[0]["cwd"] == "/tmp/project"
+    assert listing[0]["source"] == "startup"
+
+    # A resume of the same session keeps its original start time.
+    started = listing[0]["started_at"]
+    cli("session", "start", "--session", "s-1", "--cwd", "/tmp/project",
+        "--source", "resume")
+    again = json.loads(cli("session", "list").stdout)["sessions"][0]
+    assert again["started_at"] == started
+    assert again["source"] == "resume"
+
+    cli("session", "end", "--session", "s-1")
+    assert json.loads(cli("session", "list").stdout)["sessions"] == []
+
+
+def test_sessions_and_reviews_are_independent(cli, store):
+    cli("session", "start", "--session", "s-2", "--cwd", "/tmp/p")
+    raise_review(cli, session="s-2", kind="stopped")
+    assert len(json.loads(cli("session", "list").stdout)["sessions"]) == 1
+    assert len(json.loads(cli("review", "list").stdout)["reviews"]) == 1
+    # Clearing the wait leaves the session discovered.
+    cli("review", "clear", "--session", "s-2")
+    assert json.loads(cli("review", "list").stdout)["reviews"] == []
+    assert len(json.loads(cli("session", "list").stdout)["sessions"]) == 1

@@ -381,3 +381,27 @@ public struct ReviewOption: Codable, Hashable, Sendable {
 struct ReviewPage: Decodable {
     let reviews: [ReviewItem]
 }
+
+/// A supervised agent session — announced by the console plugin when the
+/// session starts or resumes, so the app discovers it before it waits.
+public struct SupervisedSession: Codable, Hashable, Identifiable, Sendable {
+    public let sessionRef: String
+    public let agent: String
+    public let cwd: String
+    public let source: String
+    public let startedAt: String
+
+    public var id: String { sessionRef }
+
+    enum CodingKeys: String, CodingKey {
+        case sessionRef = "session_ref"
+        case agent
+        case cwd
+        case source
+        case startedAt = "started_at"
+    }
+}
+
+struct SessionPage: Decodable {
+    let sessions: [SupervisedSession]
+}

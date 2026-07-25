@@ -133,3 +133,24 @@ def test_dispatcher_spawned_sessions_are_guarded_out(cli, store):
     }, extra_env={"AGENTIC_TASK_ID": "some-task"})
     assert proc.returncode == 0
     assert open_reviews(cli) == []
+
+
+def sessions(cli):
+    return json.loads(cli("session", "list").stdout)["sessions"]
+
+
+def test_session_start_announces_and_end_retires(cli, store):
+    run_hook(store, {"hook_event_name": "SessionStart", "session_id": "sess-a",
+                     "cwd": "/tmp/proj", "source": "startup"})
+    live = sessions(cli)
+    assert [s["session_ref"] for s in live] == ["sess-a"]
+    assert live[0]["source"] == "startup"
+
+    run_hook(store, {"hook_event_name": "SessionEnd", "session_id": "sess-a"})
+    assert sessions(cli) == []
+
+
+def test_resume_announces_the_same_session(cli, store):
+    run_hook(store, {"hook_event_name": "SessionStart", "session_id": "sess-b",
+                     "cwd": "/tmp/proj", "source": "resume"})
+    assert [s["source"] for s in sessions(cli)] == ["resume"]

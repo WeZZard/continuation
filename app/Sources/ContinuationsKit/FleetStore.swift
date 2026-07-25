@@ -28,6 +28,8 @@ public struct NodeState: Identifiable, Hashable {
     public var excluded: Bool = false
     /// Open review items — sessions on this node waiting on the human.
     public var reviews: [ReviewItem] = []
+    /// Supervised sessions live on this node, waiting or not.
+    public var sessions: [SupervisedSession] = []
 
     public var id: String { key }
     public var pendingCount: Int {
@@ -134,6 +136,7 @@ public final class FleetStore: ObservableObject {
         "register", "unregister", "continue", "migrate", "tick",
         "tick.start-run", "tick.evaluate", "tick.run-settled",
         "review.raise", "review.answer", "review.clear",
+        "session.start", "session.end",
     ]
 
     public init(persistence: Persistence = Persistence()) {
@@ -246,6 +249,31 @@ public final class FleetStore: ObservableObject {
 
     public var dueCount: Int { dueEntries.count }
 
+    /// One row per supervised session across the fleet, carrying the
+    /// review it is waiting on when it has one. A session with no review
+    /// is running — discovered, but asking nothing.
+    public var sessionRows: [(nodeKey: String, nodeName: String,
+                              session: SupervisedSession, review: ReviewItem?)] {
+        nodes.filter { !$0.excluded }
+            .sorted { $0.isLocal != $1.isLocal ? $0.isLocal : ($0.displayName < $1.displayName) }
+            .flatMap { node in
+                node.sessions.map { session in
+                    (node.key, node.displayName, session,
+                     node.reviews.first { $0.sessionRef == session.sessionRef })
+                }
+            }
+    }
+
+    /// Reviews whose session never announced itself — a plugin older than
+    /// the session table, or a raise from a tool.
+    public var orphanReviewRows: [(nodeKey: String, nodeName: String,
+                                   isLocal: Bool, item: ReviewItem)] {
+        reviewRows.filter { row in
+            !(node(key: row.nodeKey)?.sessions
+                .contains { $0.sessionRef == row.item.sessionRef } ?? false)
+        }
+    }
+
     /// Every open review item across the fleet, local nodes first.
     public var reviewRows: [(nodeKey: String, nodeName: String,
                              isLocal: Bool, item: ReviewItem)] {
@@ -355,12 +383,14 @@ public final class FleetStore: ObservableObject {
             let queue = try await client.queue()
             // Older serves lack /v1/reviews; that never fails the poll.
             let reviews = (try? await client.reviews()) ?? []
+            let sessions = (try? await client.sessions()) ?? []
             update(key: key) { node in
                 node.online = true
                 node.lastSeen = Date()
                 node.info = info
                 node.queue = queue
                 node.reviews = reviews
+                node.sessions = sessions
                 node.displayName = info.displayName ?? info.hostname
             }
             sortNodes()
@@ -384,9 +414,11 @@ public final class FleetStore: ObservableObject {
                     let queue = try await client.queue()
                     let info = try? await client.node()
                     let reviews = (try? await client.reviews()) ?? []
+                    let sessions = (try? await client.sessions()) ?? []
                     update(key: key) { node in
                         node.queue = queue
                         node.reviews = reviews
+                        node.sessions = sessions
                         if let info { node.info = info }
                     }
                     saveSnapshot(key: key)

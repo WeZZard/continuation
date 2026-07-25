@@ -13,6 +13,42 @@ struct SidebarView: View {
         var id: String { "\(nodeKey)#\(item.id)" }
     }
 
+    private func projectName(_ path: String) -> String {
+        path.isEmpty ? "—" : (path as NSString).lastPathComponent
+    }
+
+    /// One row per session: waiting rows are actionable, running rows
+    /// state their presence.
+    @ViewBuilder
+    private func sessionRow(nodeKey: String, nodeName: String,
+                            project: String, agent: String,
+                            review: ReviewItem?) -> some View {
+        Button {
+            if let review {
+                openReview = ReviewSheetTarget(nodeKey: nodeKey, item: review)
+            }
+        } label: {
+            Label {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(review.map { $0.summary.isEmpty ? project : $0.summary }
+                         ?? project)
+                        .lineLimit(1)
+                    Text(review == nil
+                         ? "\(agent) · running · \(nodeName)"
+                         : "\(agent) · \(project) · \(nodeName)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            } icon: {
+                Image(systemName: review.map { ReviewKindIcon.name($0.kind) }
+                      ?? "circle.dashed")
+                    .foregroundStyle(review == nil ? .secondary : .primary)
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(review == nil)
+    }
+
     var body: some View {
         List(selection: $selection) {
             Section("Fleet") {
@@ -29,29 +65,20 @@ struct SidebarView: View {
                 Label("Activity", systemImage: "waveform.path.ecg")
                     .tag(SidebarSelection.activity)
             }
-            // Sessions waiting on the human, present only while any are.
-            if !store.reviewRows.isEmpty {
-                Section("Review") {
-                    ForEach(store.reviewRows, id: \.item.id) { row in
-                        Button {
-                            openReview = ReviewSheetTarget(
-                                nodeKey: row.nodeKey, item: row.item)
-                        } label: {
-                            Label {
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text(row.item.summary.isEmpty
-                                         ? row.item.kind : row.item.summary)
-                                        .lineLimit(1)
-                                    Text("\(row.item.agent) · \(row.nodeName)")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                }
-                            } icon: {
-                                Image(systemName:
-                                    ReviewKindIcon.name(row.item.kind))
-                            }
-                        }
-                        .buttonStyle(.plain)
+            // Supervised sessions — discovered when they start, whether
+            // they are waiting on you or merely running.
+            if !store.sessionRows.isEmpty || !store.orphanReviewRows.isEmpty {
+                Section("Sessions") {
+                    ForEach(store.sessionRows, id: \.session.id) { row in
+                        sessionRow(nodeKey: row.nodeKey, nodeName: row.nodeName,
+                                   project: projectName(row.session.cwd),
+                                   agent: row.session.agent,
+                                   review: row.review)
+                    }
+                    ForEach(store.orphanReviewRows, id: \.item.id) { row in
+                        sessionRow(nodeKey: row.nodeKey, nodeName: row.nodeName,
+                                   project: projectName(row.item.cwd),
+                                   agent: row.item.agent, review: row.item)
                     }
                 }
             }

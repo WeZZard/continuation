@@ -69,7 +69,7 @@ END_KEYS = {"schema_version", "step"}
 KEBAB = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 LABEL = "com.wezzard.agent.agentic-continuation"
 SERVE_LABEL = LABEL + ".serve"
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 PROTO = "v1"
 DEFAULT_SERVE_PORT = 7787
 MDNS_SERVICE = "_agentic-cont._tcp"  # DNS-SD service names are capped at 15 bytes
@@ -351,6 +351,16 @@ CREATE TABLE IF NOT EXISTS reviews (
   resolved_at TEXT
 );
 CREATE INDEX IF NOT EXISTS reviews_open ON reviews (status, session_ref);
+CREATE TABLE IF NOT EXISTS sessions (
+  session_ref TEXT PRIMARY KEY,
+  agent TEXT NOT NULL,
+  cwd TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT '',
+  started_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  ended_at TEXT
+);
+CREATE INDEX IF NOT EXISTS sessions_live ON sessions (ended_at);
 """
 
 
@@ -1078,6 +1088,58 @@ def review_payload(row: sqlite3.Row) -> dict:
     }
 
 
+def cmd_session(args) -> int:
+    """Supervised sessions announce themselves: the app discovers a
+    session when it starts or resumes, not only when it waits."""
+    conn = db()
+    if args.action == "start":
+        if not args.session:
+            raise SystemExit("session start requires --session")
+        now = now_utc().isoformat()
+        with tx(conn):
+            existing = conn.execute(
+                "SELECT started_at FROM sessions WHERE session_ref=?",
+                (args.session,)).fetchone()
+            started = existing["started_at"] if existing else now
+            conn.execute(
+                "INSERT OR REPLACE INTO sessions (session_ref, agent, cwd,"
+                " source, started_at, updated_at, ended_at)"
+                " VALUES (?,?,?,?,?,?,NULL)",
+                (args.session, args.agent, args.cwd, args.source, started, now))
+            event(conn, "session.start", args.actor,
+                  session_ref=args.session, source=args.source)
+        return 0
+    if args.action == "end":
+        if not args.session:
+            raise SystemExit("session end requires --session")
+        with tx(conn):
+            changed = conn.execute(
+                "UPDATE sessions SET ended_at=?, updated_at=? "
+                "WHERE session_ref=? AND ended_at IS NULL",
+                (now_utc().isoformat(), now_utc().isoformat(),
+                 args.session)).rowcount
+            if changed:
+                event(conn, "session.end", args.actor, session_ref=args.session)
+        return 0
+    rows = conn.execute(
+        "SELECT * FROM sessions WHERE ended_at IS NULL ORDER BY started_at"
+    ).fetchall()
+    print(json.dumps({"sessions": [session_payload(row) for row in rows]},
+                     ensure_ascii=False))
+    return 0
+
+
+def session_payload(row: sqlite3.Row) -> dict:
+    return {
+        "session_ref": row["session_ref"],
+        "agent": row["agent"],
+        "cwd": row["cwd"],
+        "source": row["source"],
+        "started_at": row["started_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
 def cmd_authoring(args) -> int:
     """Print the current edition's core-authoring guide (the program
     constants — the grammar's single home; plugins must never carry a
@@ -1682,6 +1744,8 @@ class NodeAPI(BaseHTTPRequestHandler):
             return self._json(collect_queue(conn, now_local()))
         if head == "reviews" and not rest:
             return self._reviews()
+        if head == "sessions" and not rest:
+            return self._sessions()
         if head == "log" and not rest:
             return self._log(query)
         if head == "events" and not rest:
@@ -1703,6 +1767,18 @@ class NodeAPI(BaseHTTPRequestHandler):
         finally:
             conn.close()
         self._json({"reviews": [review_payload(row) for row in rows]})
+
+    def _sessions(self) -> None:
+        conn = db_readonly()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM sessions WHERE ended_at IS NULL"
+                " ORDER BY started_at").fetchall()
+        except sqlite3.OperationalError:
+            return self._json({"sessions": []})
+        finally:
+            conn.close()
+        self._json({"sessions": [session_payload(row) for row in rows]})
 
     def _node(self) -> None:
         conn = db_readonly()
@@ -1918,6 +1994,15 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("authoring",
                        help="Print the current edition's core-authoring guide.")
     p.set_defaults(fn=cmd_authoring)
+
+    p = sub.add_parser("session",
+                       help="Supervised sessions: start/end/list.")
+    p.add_argument("action", choices=("start", "end", "list"))
+    p.add_argument("--session", default="")
+    p.add_argument("--agent", default="claude-code")
+    p.add_argument("--cwd", default="")
+    p.add_argument("--source", default="")
+    p.set_defaults(fn=cmd_session)
 
     p = sub.add_parser("review",
                        help="Console channel: raise/wait/answer/clear/list"

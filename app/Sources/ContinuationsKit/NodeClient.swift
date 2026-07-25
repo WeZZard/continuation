@@ -39,6 +39,10 @@ public struct NodeClient: Sendable {
         try await get(ReviewPage.self, "/v1/reviews").reviews
     }
 
+    public func sessions() async throws -> [SupervisedSession] {
+        try await get(SessionPage.self, "/v1/sessions").sessions
+    }
+
     public func tasks() async throws -> [TaskInfo] {
         struct Page: Decodable { let tasks: [TaskInfo] }
         return try await get(Page.self, "/v1/tasks").tasks

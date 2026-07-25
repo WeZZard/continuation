@@ -12,6 +12,7 @@ struct CaptureSection: View {
 
     private var pluginDirectory: URL { model.engine.paths.consoleSource }
 
+
     private var command: String? {
         CaptureLaunch.command(for: .claude, pluginDirectory: pluginDirectory)
     }
@@ -66,11 +67,11 @@ struct CaptureSection: View {
         let engine = model.engine
         let directory = pluginDirectory
         Task.detached(priority: .userInitiated) {
+            // Always refresh: the command names the app's copy of the
+            // plugin, so that copy must be the one this app carries.
             var problem: String?
-            if !FileManager.default.fileExists(atPath: directory.path) {
-                do { try engine.materialize() } catch {
-                    problem = error.localizedDescription
-                }
+            do { try engine.materialize() } catch {
+                problem = error.localizedDescription
             }
             await MainActor.run {
                 failure = problem
