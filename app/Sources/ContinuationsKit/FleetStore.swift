@@ -28,11 +28,42 @@ public struct NodeState: Identifiable, Hashable {
         return queue.due.count + queue.scheduled.count + queue.attention.count
     }
 
-    /// Reached over loopback — only this machine can be. Pinned first in
-    /// the fleet and labeled "This Mac".
+    /// This machine — reached over loopback or any of its own interface
+    /// addresses (a discovered face carries a LAN address). Pinned first
+    /// in the fleet and labeled "This Mac".
     public var isLocal: Bool {
-        ["127.0.0.1", "localhost", "::1"].contains(url.host ?? "")
+        let host = (url.host ?? "").components(separatedBy: "%").first ?? ""
+        return ["127.0.0.1", "localhost", "::1"].contains(host)
+            || LocalAddresses.all.contains(host)
     }
+}
+
+/// Every numeric address this machine answers on, for deciding whether a
+/// discovered node is this Mac.
+public enum LocalAddresses {
+    public static let all: Set<String> = {
+        var addresses: Set<String> = []
+        var list: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&list) == 0 else { return [] }
+        defer { freeifaddrs(list) }
+        var cursor = list
+        while let entry = cursor {
+            defer { cursor = entry.pointee.ifa_next }
+            guard let address = entry.pointee.ifa_addr else { continue }
+            let family = address.pointee.sa_family
+            guard family == UInt8(AF_INET) || family == UInt8(AF_INET6) else { continue }
+            let size = family == UInt8(AF_INET)
+                ? socklen_t(MemoryLayout<sockaddr_in>.size)
+                : socklen_t(MemoryLayout<sockaddr_in6>.size)
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            if getnameinfo(address, size, &host, socklen_t(host.count),
+                           nil, 0, NI_NUMERICHOST) == 0 {
+                let text = String(cString: host)
+                addresses.insert(text.components(separatedBy: "%").first ?? text)
+            }
+        }
+        return addresses
+    }()
 }
 
 public struct FleetEntry: Identifiable, Hashable {
@@ -190,21 +221,26 @@ public final class FleetStore: ObservableObject {
 
     private func upsertBonjour(_ service: DiscoveredService) {
         let key = "bonjour:\(service.name)"
-        // The advertisement names its node id; a node already known under
-        // another entry (a manual address, typically) is refused outright —
-        // no transient duplicate, no dependence on polling the discovered
-        // address.
-        if let id = service.nodeID,
-           nodes.contains(where: { $0.key != key && $0.info?.nodeID == id }) {
-            if nodes.contains(where: { $0.key == key }) {
-                removeNode(key: key)
-            } else {
-                suppressedKeys.insert(key)
+        guard !suppressedKeys.contains(key) else { return }
+        // Discovery outranks a by-address entry for the same node id: the
+        // advertisement is live identity, the address entry only its
+        // fallback. Displacing leaves manual-nodes.json untouched, so the
+        // fallback returns at the next launch if the advertisement is gone.
+        if let id = service.nodeID {
+            for twin in nodes where twin.key != key && twin.info?.nodeID == id {
+                displace(key: twin.key)
             }
-            return
         }
         upsert(key: key, source: .bonjour,
                url: service.url, fallbackName: service.name)
+    }
+
+    /// Remove a row without touching persisted manual addresses.
+    private func displace(key: String) {
+        loops[key]?.cancel()
+        loops[key] = nil
+        nodes.removeAll { $0.key == key }
+        persistence.deleteSnapshot(key: key)
     }
 
     private func upsert(key: String, source: NodeSource, url: URL,
@@ -294,18 +330,18 @@ public final class FleetStore: ObservableObject {
 
     private func dedupe(nodeID: String, keep key: String) {
         // The same node can surface twice (Bonjour + manual, or an old
-        // Bonjour name). Keep manual entries over Bonjour ones; otherwise
-        // keep the current loop's entry.
+        // Bonjour name). The discovered face wins; the by-address entry is
+        // its fallback and is displaced, never deleted from persistence.
         let duplicates = nodes.filter {
             $0.key != key && $0.info?.nodeID == nodeID
         }
         guard let mine = node(key: key) else { return }
         for duplicate in duplicates {
-            if duplicate.source == .manual && mine.source == .bonjour {
-                removeNode(key: key)
+            if mine.source == .manual && duplicate.source == .bonjour {
+                displace(key: key)
                 return
             }
-            removeNode(key: duplicate.key)
+            displace(key: duplicate.key)
         }
     }
 
