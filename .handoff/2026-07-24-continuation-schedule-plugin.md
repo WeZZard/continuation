@@ -319,6 +319,22 @@ with the user first).
   SessionStart → UserPromptSubmit → stop raise → clear → session.end,
   every CLI call status 0.
 
+## Addendum: serve dropped off the fleet holding stale WAL handles (2026-07-26)
+
+- Symptom: the app showed THIS Mac offline while the minis were green;
+  the daemon was alive and every endpoint answered
+  `OperationalError: unable to open database file` — yet the CLI read
+  the same store fine, and so did a hand-run read-only open with the
+  daemon's own interpreter.
+- Cause: serve opened a read-only connection per handler and never
+  closed it (and the SSE stream held one for the life of the stream).
+  SQLite deletes -wal/-shm when the last writer closes cleanly; the
+  daemon kept those mappings and every subsequent open failed. lsof
+  showed it holding unlinked store.db-wal/-shm.
+- Fix: a `readonly()` context manager; every handler and each SSE poll
+  now opens and closes. Restarted the daemon — node healthy again.
+  Watch for this pattern in any future long-lived reader.
+
 ## Not done / open
 
 - **Not published to the wezzard-skills marketplace** — that catalog pins
