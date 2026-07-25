@@ -8,10 +8,10 @@ struct SettingsView: View {
         TabView {
             GeneralSettingsView(model: installer)
                 .tabItem { Label("General", systemImage: "gearshape") }
-            CLISettingsView(model: installer)
-                .tabItem { Label("CLI", systemImage: "terminal") }
             NodesSettingsView()
                 .tabItem { Label("Nodes", systemImage: "point.3.connected.trianglepath.dotted") }
+            CLISettingsView(model: installer)
+                .tabItem { Label("CLI", systemImage: "terminal") }
         }
         .frame(width: 560)
     }
@@ -47,7 +47,7 @@ struct NodesSettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(height: 320)
+        .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -196,7 +196,10 @@ final class InstallerModel: ObservableObject {
 struct GeneralSettingsView: View {
     @ObservedObject var model: InstallerModel
     @State private var confirmUninstall: AgentLogo?
-    @State private var revealsLocation: Set<AgentLogo> = []
+    /// The second line cycles per click: indicator → location → copy the
+    /// location (flash "Copied", settle back to the location) → indicator.
+    @State private var revealPhase: [AgentLogo: Int] = [:]
+    @State private var copiedFlash: Set<AgentLogo> = []
 
     /// The banner exists only when something needs doing; a healthy Mac
     /// shows no recap.
@@ -214,8 +217,8 @@ struct GeneralSettingsView: View {
                 agentSections
             }
             .formStyle(.grouped)
+            .fixedSize(horizontal: false, vertical: true)
         }
-        .frame(height: 480)
         .overlay(alignment: .bottomTrailing) {
             Button {
                 model.refresh()
@@ -331,20 +334,28 @@ struct GeneralSettingsView: View {
                     }
                 }
                 Button {
-                    if revealsLocation.contains(logo) {
-                        revealsLocation.remove(logo)
-                    } else {
-                        revealsLocation.insert(logo)
+                    let phase = ((revealPhase[logo] ?? 0) + 1) % 3
+                    revealPhase[logo] = phase
+                    if phase == 2 {
+                        let pasteboard = NSPasteboard.general
+                        pasteboard.clearContents()
+                        pasteboard.setString(locationLine(for: status), forType: .string)
+                        copiedFlash.insert(logo)
+                        Task {
+                            try? await Task.sleep(for: .seconds(1.2))
+                            copiedFlash.remove(logo)
+                        }
                     }
                 } label: {
-                    if revealsLocation.contains(logo) {
-                        Text(locationLine(for: status))
+                    if (revealPhase[logo] ?? 0) == 0 {
+                        statusIndicator(installed: isWired(status))
+                    } else {
+                        Text(copiedFlash.contains(logo)
+                             ? "Copied" : locationLine(for: status))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                             .truncationMode(.middle)
-                    } else {
-                        statusIndicator(installed: isWired(status))
                     }
                 }
                 .buttonStyle(.plain)
@@ -481,6 +492,7 @@ struct CLISettingsView: View {
                 }
             }
             .formStyle(.grouped)
+            .fixedSize(horizontal: false, vertical: true)
             if let error = model.lastError {
                 Text(error).font(.caption).foregroundStyle(.red)
                     .padding(.bottom, 6)
@@ -496,7 +508,6 @@ struct CLISettingsView: View {
                 || (!cliInstalled && model.snapshot?.bundledCLIVersion == nil))
             .padding(.bottom, 16)
         }
-        .frame(height: 340)
         .confirmationDialog(
             "Uninstall the `continuation` command?",
             isPresented: $confirmUninstall,

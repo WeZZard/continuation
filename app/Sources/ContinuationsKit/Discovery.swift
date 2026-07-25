@@ -9,6 +9,9 @@ import Foundation
 public struct DiscoveredService: Identifiable, Hashable, Sendable {
     public let name: String
     public let url: URL
+    /// From the advertisement's TXT record (`nodeid=<ULID>`): identity
+    /// without polling, so duplicates are refusable before they appear.
+    public let nodeID: String?
     public var id: String { name }
 }
 
@@ -24,7 +27,7 @@ public final class BonjourDiscovery: ObservableObject {
     public func start() {
         guard browser == nil else { return }
         let browser = NWBrowser(
-            for: .bonjour(type: "_agentic-cont._tcp", domain: nil),
+            for: .bonjourWithTXTRecord(type: "_agentic-cont._tcp", domain: nil),
             using: NWParameters(tls: nil, tcp: NWProtocolTCP.Options()))
         browser.browseResultsChangedHandler = { [weak self] results, _ in
             Task { @MainActor in self?.sync(results) }
@@ -45,16 +48,20 @@ public final class BonjourDiscovery: ObservableObject {
         for result in results {
             guard case .service(let name, _, _, _) = result.endpoint else { continue }
             names.insert(name)
+            var nodeID: String?
+            if case .bonjour(let txt) = result.metadata {
+                nodeID = txt["nodeid"]
+            }
             if !resolving.contains(name),
                !services.contains(where: { $0.name == name }) {
                 resolving.insert(name)
-                resolve(result.endpoint, name: name)
+                resolve(result.endpoint, name: name, nodeID: nodeID)
             }
         }
         services.removeAll { !names.contains($0.name) }
     }
 
-    private func resolve(_ endpoint: NWEndpoint, name: String) {
+    private func resolve(_ endpoint: NWEndpoint, name: String, nodeID: String?) {
         let connection = NWConnection(to: endpoint, using: .tcp)
         connection.stateUpdateHandler = { [weak self] state in
             switch state {
@@ -67,7 +74,8 @@ public final class BonjourDiscovery: ObservableObject {
                           case .hostPort(let host, let port) = remote,
                           let url = Self.url(host: host, port: port) else { return }
                     if !self.services.contains(where: { $0.name == name }) {
-                        self.services.append(DiscoveredService(name: name, url: url))
+                        self.services.append(
+                            DiscoveredService(name: name, url: url, nodeID: nodeID))
                         self.services.sort { $0.name < $1.name }
                     }
                 }

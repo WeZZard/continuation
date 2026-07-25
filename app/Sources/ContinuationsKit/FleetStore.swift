@@ -189,7 +189,21 @@ public final class FleetStore: ObservableObject {
     }
 
     private func upsertBonjour(_ service: DiscoveredService) {
-        upsert(key: "bonjour:\(service.name)", source: .bonjour,
+        let key = "bonjour:\(service.name)"
+        // The advertisement names its node id; a node already known under
+        // another entry (a manual address, typically) is refused outright —
+        // no transient duplicate, no dependence on polling the discovered
+        // address.
+        if let id = service.nodeID,
+           nodes.contains(where: { $0.key != key && $0.info?.nodeID == id }) {
+            if nodes.contains(where: { $0.key == key }) {
+                removeNode(key: key)
+            } else {
+                suppressedKeys.insert(key)
+            }
+            return
+        }
+        upsert(key: key, source: .bonjour,
                url: service.url, fallbackName: service.name)
     }
 
