@@ -34,7 +34,9 @@ public struct Persistence: Sendable {
     public init(directory: URL? = nil) {
         self.directory = directory ?? FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Continuations", isDirectory: true)
+            .appendingPathComponent(
+                AppSupportUmbrella.directoryName(base: "Continuations"),
+                isDirectory: true)
         try? FileManager.default.createDirectory(
             at: self.directory.appendingPathComponent("nodes", isDirectory: true),
             withIntermediateDirectories: true)

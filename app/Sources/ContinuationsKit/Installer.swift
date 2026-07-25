@@ -12,6 +12,18 @@ import Foundation
 // other than the materialized payload is a development checkout: the app
 // changes it only on an explicit button press, never automatically.
 
+/// Debug and release builds keep separate Application Support umbrellas
+/// (user ruling 2026-07-25): a debug app never writes into the release
+/// app's folders.
+public enum AppSupportUmbrella {
+    public static func directoryName(
+        base: String,
+        bundleID: String? = Bundle.main.bundleIdentifier
+    ) -> String {
+        (bundleID?.hasSuffix(".debug") ?? false) ? base + "-Debug" : base
+    }
+}
+
 public enum PluginWiring: Equatable, Sendable {
     case agentMissing
     case notInstalled
@@ -195,7 +207,11 @@ public final class InstallerEngine {
             return Paths(
                 payloadSource: bundle.resourceURL?
                     .appendingPathComponent("payload", isDirectory: true),
-                payloadDest: appSupport.appendingPathComponent("Continuation", isDirectory: true),
+                payloadDest: appSupport.appendingPathComponent(
+                    AppSupportUmbrella.directoryName(
+                        base: "Continuation",
+                        bundleID: bundle.bundleIdentifier),
+                    isDirectory: true),
                 claudeSettings: home.appendingPathComponent(".claude/settings.json"),
                 claudeCache: home.appendingPathComponent(
                     ".claude/plugins/cache/continuation/continuation", isDirectory: true),
@@ -279,7 +295,8 @@ public final class InstallerEngine {
         let fm = FileManager.default
         let dest = paths.payloadDest
         let staging = dest.deletingLastPathComponent()
-            .appendingPathComponent("Continuation.staging", isDirectory: true)
+            .appendingPathComponent(dest.lastPathComponent + ".staging",
+                                    isDirectory: true)
         try? fm.removeItem(at: staging)
         try fm.createDirectory(at: staging.deletingLastPathComponent(),
                                withIntermediateDirectories: true)
@@ -287,7 +304,8 @@ public final class InstallerEngine {
         try fm.setAttributes([.posixPermissions: 0o755],
                              ofItemAtPath: staging.appendingPathComponent("bin/continuation").path)
         let old = dest.deletingLastPathComponent()
-            .appendingPathComponent("Continuation.previous", isDirectory: true)
+            .appendingPathComponent(dest.lastPathComponent + ".previous",
+                                    isDirectory: true)
         try? fm.removeItem(at: old)
         if fm.fileExists(atPath: dest.path) { try fm.moveItem(at: dest, to: old) }
         try fm.moveItem(at: staging, to: dest)

@@ -190,3 +190,20 @@ extension InstallerTests {
         XCTAssertNoThrow(try engine.unlinkCLI())   // idempotent
     }
 }
+
+extension InstallerTests {
+
+    func testUmbrellaNamesSplitByBuild() {
+        XCTAssertEqual(AppSupportUmbrella.directoryName(
+            base: "Continuation",
+            bundleID: "com.wezzarddesign.continuation.debug"),
+            "Continuation-Debug")
+        XCTAssertEqual(AppSupportUmbrella.directoryName(
+            base: "Continuation",
+            bundleID: "com.wezzarddesign.continuations"),
+            "Continuation")
+        XCTAssertEqual(AppSupportUmbrella.directoryName(
+            base: "Continuations", bundleID: nil),
+            "Continuations")
+    }
+}
