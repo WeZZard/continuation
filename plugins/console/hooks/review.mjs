@@ -82,15 +82,19 @@ function waitSeconds() {
 /** Seconds an idle session is held open for the console, 0 for never.
  *
  *  Holding is what makes a message from the console land: the hook stays
- *  alive, so there is something to deliver to. It costs the terminal,
- *  though — Claude Code queues whatever is typed while a hook runs and
- *  dispatches no event for it, so the session neither sees the typing
- *  nor tells us about it until the hold ends (measured: a message typed
- *  10s into a 60s hold was acted on at 61s). Hence off by default: hold
- *  the sessions nobody is sitting in front of, watch the rest. */
+ *  alive, so there is something to deliver to. A session that does not
+ *  hold shows up in the review box with every action greyed out, which
+ *  is the box failing at its one job — so sessions hold by default.
+ *
+ *  It costs the terminal: Claude Code queues whatever is typed while a
+ *  hook runs and dispatches no event for it, so a message typed into the
+ *  terminal mid-hold is acted on only once the hold ends (measured: typed
+ *  at 10s into a 60s hold, acted on at 61s). Dismiss in the console ends
+ *  a hold at once, and CONTINUATION_REVIEW_HOLD=0 turns holding off for a
+ *  session whose terminal must never wait. */
 function holdSeconds() {
-  const raw = Number(process.env.CONTINUATION_REVIEW_HOLD ?? "0");
-  return Number.isFinite(raw) && raw > 0 ? raw : 0;
+  const raw = Number(process.env.CONTINUATION_REVIEW_HOLD ?? "1800");
+  return Number.isFinite(raw) && raw >= 0 ? raw : 1800;
 }
 
 /** A session that stopped is idle, and idle is a review item. When the
@@ -111,9 +115,19 @@ function idle(cli, session, cwd, summary) {
   const waited = runCLI(cli, ["review", "wait", reviewID,
                               "--timeout", String(seconds)],
                         { timeout: (seconds + 15) * 1000 });
+  if (waited.status === 3) {
+    // Held as long as we promised and nobody came. The session is still
+    // idle and still worth seeing, so it stays in the box — saying
+    // plainly that it can no longer be reached.
+    runCLI(cli, ["review", "clear", "--session", session, "--kind", "stopped"]);
+    runCLI(cli,
+      ["review", "raise", "--session", session, "--kind", "stopped",
+       "--cwd", cwd, "--summary", summary, "--payload", "-"],
+      { input: JSON.stringify({ held: false }) });
+    return;
+  }
   if (waited.status !== 0) {
-    // Cleared from the console, or held as long as we promised. Either
-    // way nothing is listening now, so the item leaves the queue.
+    // Cleared from the console or by the session moving on.
     runCLI(cli, ["review", "clear", "--session", session, "--kind", "stopped"]);
     return;
   }

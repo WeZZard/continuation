@@ -205,17 +205,16 @@ public enum CaptureLaunch {
 
     /// nil when the agent has no hook surface this plugin can use.
     ///
-    /// `held: true` keeps the session reachable from the console after
-    /// every turn, which is what makes Send work — at the price of the
-    /// terminal, since Claude Code queues anything typed while a hook
-    /// runs. Use it for sessions nobody is sitting in front of.
+    /// Sessions hold by default, so the plain command is already
+    /// drivable. `held: false` writes the opt-out for a terminal that
+    /// must never wait on a hook.
     public static func command(for agent: AgentKind, pluginDirectory: URL,
-                               held: Bool = false) -> String? {
+                               held: Bool = true) -> String? {
         switch agent {
         case .claude:
             let path = pluginDirectory.path
             let quoted = path.contains(" ") ? "'\(path)'" : path
-            let prefix = held ? "CONTINUATION_REVIEW_HOLD=\(holdSeconds) " : ""
+            let prefix = held ? "" : "CONTINUATION_REVIEW_HOLD=0 "
             return "\(prefix)claude --plugin-dir \(quoted)"
         case .pi:
             return nil

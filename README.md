@@ -233,15 +233,19 @@ exit") flag while being as gone as it gets. A session from a plugin too
 old to report a pid is left alone — silence about liveness is not
 evidence of death.
 
-Sending a message needs the session to be **held**, which is opt-in:
-`CONTINUATION_REVIEW_HOLD=<seconds>` (the Agent settings panel writes it
-into the launch command). A held session's `Stop` hook stays alive
-between turns, so the message arrives as its next instruction. The cost
-is the terminal — Claude Code queues anything typed while a hook runs
-and dispatches no event for it, so a message typed 10s into a 60s hold
-was acted on at 61s. Hold the sessions nobody is sitting in front of;
-watch the rest, where questions and plans stay actionable because those
-hooks block anyway.
+Sending a message needs the session to be **held**, and sessions hold by
+default for 30 minutes after each turn: the `Stop` hook stays alive, so
+the message arrives as the session's next instruction. An item that
+cannot be acted on is the box failing at its one job, which is why this
+is the default rather than a flag.
+
+Holding costs the terminal. Claude Code queues anything typed while a
+hook runs and dispatches no event for it, so a message typed 10s into a
+60s hold was acted on at 61s. Dismiss in the console ends a hold at
+once; `CONTINUATION_REVIEW_HOLD=0` turns holding off for a session whose
+terminal must never wait, and `CONTINUATION_REVIEW_HOLD=<seconds>` sets
+a different window. When a hold runs out the session stays in the box,
+marked as no longer reachable rather than quietly dropped.
 
 **A session in an untrusted workspace can never appear.** Claude Code
 refuses to run any hook where workspace trust has not been accepted —

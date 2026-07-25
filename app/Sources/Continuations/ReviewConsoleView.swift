@@ -154,26 +154,12 @@ struct ReviewConsoleView: View {
     /// without a remedy is just a locked door.
     @ViewBuilder private var unreachableNotice: some View {
         if row.isLocal {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("This session is not holding, so a message would have "
-                     + "nowhere to land. A session launched with the command "
-                     + "below stays reachable between turns.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: 8) {
-                    Text(CaptureLaunch.command(for: .claude,
-                                               pluginDirectory: consoleDirectory,
-                                               held: true) ?? "")
-                        .font(.system(.caption2, design: .monospaced))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .textSelection(.enabled)
-                    Button(copiedCommand ? "Copied" : "Copy") { copyLaunch() }
-                        .controlSize(.small)
-                        .fixedSize()
-                }
-            }
+            Text("This session is no longer holding — its window ran out, or "
+                 + "it was launched with holding off. Type into its terminal "
+                 + "and it becomes reachable again at the next stop.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         } else {
             Text("This session runs on another node; act on it there.")
                 .font(.caption)

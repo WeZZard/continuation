@@ -20,8 +20,17 @@ def run_hook(store, payload, extra_env=None, timeout=30):
     env.pop("AGENTIC_TASK_ID", None)
     env.update({"AGENTIC_CONTINUATION_STORE": str(store),
                 "CONTINUATION_BIN": BIN,
-                "CONTINUATION_REVIEW_WAIT": "5"})
-    env.update(extra_env or {})
+                "CONTINUATION_REVIEW_WAIT": "5",
+                # Sessions hold by default; a test that is not about
+                # holding says so, rather than waiting out the window.
+                "CONTINUATION_REVIEW_HOLD": "0"})
+    for key, value in (extra_env or {}).items():
+        # None removes a key, so a test can exercise a real default the
+        # harness overrides for speed.
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = value
     # node exactly as hooks.json runs it: Claude Code is a Node program,
     # so node is present wherever a session is.
     return subprocess.run(
@@ -199,12 +208,12 @@ def test_guarded_sessions_never_register(cli, store):
     assert sessions(cli) == []
 
 
-def test_an_idle_session_is_watched_but_not_held_by_default(cli, store):
-    """Holding freezes the terminal — Claude Code queues typed input while
-    a hook runs — so a session nobody asked to hold returns at once and
-    says plainly that it cannot take a message."""
+def test_a_session_told_not_to_hold_returns_at_once(cli, store):
+    """Holding costs the terminal, so a session whose terminal must never
+    wait can opt out — and then says plainly that it takes no message."""
     result = run_hook(store, {"hook_event_name": "Stop",
                               "session_id": "sess-idle", "cwd": "/tmp/p"},
+                      extra_env={"CONTINUATION_REVIEW_HOLD": "0"},
                       timeout=15)
     assert result.returncode == 0
     assert result.stdout.strip() == ""
@@ -289,3 +298,43 @@ def test_the_hook_names_the_process_its_session_belongs_to(cli, store):
     sessions = json.loads(cli("session", "list").stdout)["sessions"]
     assert [s["session_ref"] for s in sessions] == ["sess-pid"]
     assert sessions[0]["pid"] == os.getpid()
+
+
+def test_a_session_holds_without_being_asked(cli, store):
+    """The box's one job is to be actionable, so holding is the default:
+    an idle session is reachable unless its terminal says otherwise."""
+    def send_from_console():
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            reviews = open_reviews(cli)
+            if reviews:
+                assert reviews[0]["payload"] == {"held": True}
+                cli("review", "answer", str(reviews[0]["id"]),
+                    "--decision", "-",
+                    stdin=json.dumps({"message": "Carry on."}))
+                return
+            time.sleep(0.2)
+
+    thread = threading.Thread(target=send_from_console)
+    thread.start()
+    result = run_hook(store, {"hook_event_name": "Stop",
+                              "session_id": "sess-default-hold",
+                              "cwd": "/tmp/p"},
+                      extra_env={"CONTINUATION_REVIEW_HOLD": None}, timeout=40)
+    thread.join()
+    decision = json.loads(result.stdout)
+    assert decision["decision"] == "block"
+    assert "Carry on." in decision["reason"]
+
+
+def test_an_expired_hold_leaves_the_session_visible(cli, store):
+    """A hold that runs out does not delete the session from the box —
+    it is still idle, and still worth seeing. It just stops claiming to
+    be reachable."""
+    result = run_hook(store, {"hook_event_name": "Stop",
+                              "session_id": "sess-expired", "cwd": "/tmp/p"},
+                      extra_env={"CONTINUATION_REVIEW_HOLD": "2"}, timeout=30)
+    assert result.stdout.strip() == ""
+    reviews = open_reviews(cli)
+    assert [r["summary"] for r in reviews] == ["Waiting for your next message"]
+    assert reviews[0]["payload"] == {"held": False}
