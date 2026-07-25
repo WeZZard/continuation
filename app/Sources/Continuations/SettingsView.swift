@@ -6,8 +6,8 @@ struct SettingsView: View {
 
     var body: some View {
         TabView {
-            GeneralSettingsView(model: installer)
-                .tabItem { Label("General", systemImage: "gearshape") }
+            AgentSettingsView(model: installer)
+                .tabItem { Label("Agent", systemImage: "gearshape") }
             NodesSettingsView()
                 .tabItem { Label("Nodes", systemImage: "point.3.connected.trianglepath.dotted") }
             CLISettingsView(model: installer)
@@ -183,7 +183,7 @@ final class InstallerModel: ObservableObject {
     }
 }
 
-struct GeneralSettingsView: View {
+struct AgentSettingsView: View {
     @ObservedObject var model: InstallerModel
     @State private var operation: OperationSheetModel?
 
@@ -225,6 +225,7 @@ struct GeneralSettingsView: View {
                     .help("Refresh")
                 }
             }
+            CaptureSection(model: model)
         }
         .formStyle(.grouped)
         .scrollDisabled(true)

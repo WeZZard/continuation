@@ -81,6 +81,9 @@ mkdir -p "$PAYLOAD/bin" "$PAYLOAD/.claude-plugin"
 cp ../bin/continuation "$PAYLOAD/bin/continuation"
 cp ../.claude-plugin/marketplace.json "$PAYLOAD/.claude-plugin/marketplace.json"
 ditto ../plugins/continuation "$PAYLOAD/plugins/continuation"
+# The console plugin is injected per session with --plugin-dir,
+# never installed; the Capture panel hands out its path.
+ditto ../plugins/console "$PAYLOAD/plugins/console"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

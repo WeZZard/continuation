@@ -281,6 +281,11 @@ public final class InstallerEngine {
         public var pluginSource: URL {
             payloadDest.appendingPathComponent("plugins/continuation")
         }
+
+        /// The console plugin, injected at launch rather than installed.
+        public var consoleSource: URL {
+            payloadDest.appendingPathComponent("plugins/console")
+        }
     }
 
     public let paths: Paths

@@ -380,3 +380,26 @@ extension InstallerTests {
         XCTAssertNoThrow(try engine.unlinkCLI())   // idempotent
     }
 }
+
+// MARK: - Capture
+
+extension InstallerTests {
+
+    func testCaptureCommandQuotesTheSpacedPayloadPath() {
+        let directory = URL(fileURLWithPath:
+            "/Users/u/Library/Application Support/Continuation-Debug/plugins/console")
+        XCTAssertEqual(
+            CaptureLaunch.command(for: .claude, pluginDirectory: directory),
+            "claude --plugin-dir '/Users/u/Library/Application Support/"
+                + "Continuation-Debug/plugins/console'")
+        // pi has no hook surface this plugin can use yet.
+        XCTAssertNil(CaptureLaunch.command(for: .pi, pluginDirectory: directory))
+    }
+
+    func testCaptureCommandLeavesAPlainPathUnquoted() {
+        XCTAssertEqual(
+            CaptureLaunch.command(for: .claude,
+                                  pluginDirectory: URL(fileURLWithPath: "/opt/console")),
+            "claude --plugin-dir /opt/console")
+    }
+}

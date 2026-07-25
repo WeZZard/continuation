@@ -273,6 +273,27 @@ with the user first).
   debug umbrella, `claude plugin list` reports it enabled.
 - Swift tests 23 → 31 (states, plans incl. convergence, geometry regimes).
 
+## Addendum: the Agent panel hands out the capture command (2026-07-26)
+
+- The Settings panel formerly "General" is now **Agent**: the Agents
+  section (cells + operation sheet) with a "Launch a Supervised Session"
+  section beneath it — Claude Code only, since no console plugin exists
+  for pi (user ruling; the tab-of-its-own version was folded in).
+- The section shows `claude --plugin-dir '<payload>/plugins/console'`
+  with a Copy button. bundle.sh now embeds `plugins/console` in the
+  payload so the command names an app-owned path, never a checkout.
+  Copy materializes the payload first when it is absent — work inside
+  the app's own container, so no disclosure sheet.
+- **Two real bugs caught by running the copied command**: (1) the hook
+  manifests did not quote `${CLAUDE_PLUGIN_ROOT}`, so any plugin root
+  containing spaces — which the Application Support umbrella always
+  does — broke every hook ("can't open file '/Users/…/Application'").
+  Both plugins' hooks.json now quote it. (2) Earlier the same day, the
+  operation sheet exposed Claude's stale marketplace listing (see the
+  previous addendum). Verified after each fix by running the app's own
+  copied command: session ran clean, store shows raise+clear.
+- Swift tests 31 → 33 (launch command quoting, pi returning none).
+
 ## Not done / open
 
 - **Not published to the wezzard-skills marketplace** — that catalog pins

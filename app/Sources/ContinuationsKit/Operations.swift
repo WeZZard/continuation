@@ -194,3 +194,21 @@ public enum AgentCellGeometry {
         return ratio * verticalPadding / (1 - ratio)
     }
 }
+
+
+/// Supervision is opt-in per session: the console plugin is injected at
+/// launch, never installed. The Capture panel hands out the command.
+public enum CaptureLaunch {
+
+    /// nil when the agent has no hook surface this plugin can use.
+    public static func command(for agent: AgentKind, pluginDirectory: URL) -> String? {
+        switch agent {
+        case .claude:
+            let path = pluginDirectory.path
+            let quoted = path.contains(" ") ? "'\(path)'" : path
+            return "claude --plugin-dir \(quoted)"
+        case .pi:
+            return nil
+        }
+    }
+}
