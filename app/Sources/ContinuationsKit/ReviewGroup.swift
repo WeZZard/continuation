@@ -11,10 +11,15 @@ public struct ReviewRow: Identifiable, Hashable, Sendable {
     public let sessionRef: String
     public let cwd: String
     public let review: ReviewItem?
+    /// Whether the node this session lives on is answering. An offline
+    /// node's rows are the last thing it said, not what is true now.
+    public let nodeOnline: Bool
+    public let lastSeen: Date?
 
     public init(nodeKey: String, nodeName: String, isLocal: Bool,
                 agent: String, sessionRef: String, cwd: String,
-                review: ReviewItem?) {
+                review: ReviewItem?, nodeOnline: Bool = true,
+                lastSeen: Date? = nil) {
         self.nodeKey = nodeKey
         self.nodeName = nodeName
         self.isLocal = isLocal
@@ -22,6 +27,8 @@ public struct ReviewRow: Identifiable, Hashable, Sendable {
         self.sessionRef = sessionRef
         self.cwd = cwd
         self.review = review
+        self.nodeOnline = nodeOnline
+        self.lastSeen = lastSeen
     }
 
     public var id: String { "\(nodeKey)#\(sessionRef)" }
@@ -37,6 +44,19 @@ public struct ReviewRow: Identifiable, Hashable, Sendable {
     public var title: String {
         guard let review else { return "Running" }
         return review.summary.isEmpty ? review.kind.capitalized : review.summary
+    }
+
+    /// What the row can honestly claim. An offline node's session was
+    /// running when we last heard; it may have finished, stopped, or
+    /// died since, and saying "running" flat would be a guess.
+    public var stateLine: String {
+        if !nodeOnline {
+            guard let lastSeen else { return "last seen — node offline" }
+            return "as of " + lastSeen.formatted(date: .omitted,
+                                                 time: .shortened)
+        }
+        if canReceiveMessage { return "can be messaged" }
+        return isWaiting ? "" : "running"
     }
 }
 

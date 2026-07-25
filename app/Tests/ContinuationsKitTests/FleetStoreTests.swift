@@ -176,3 +176,53 @@ extension FleetStoreTests {
         XCTAssertFalse(row?.canReceiveMessage ?? true)
     }
 }
+
+// MARK: - An offline node's rows say so
+
+extension FleetStoreTests {
+
+    func testAnOfflineNodesSessionDoesNotClaimToBeRunning() {
+        // The app kept a five-minute-old snapshot on screen reading
+        // "running" while the session was in fact idle and waiting.
+        let store = makeStore()
+        var node = manualNode(nodeID: "X")
+        node.sessions = [session("a", cwd: "/w/alpha")]
+        node.online = false
+        node.lastSeen = Date(timeIntervalSince1970: 1_785_000_000)
+        store.seed(node)
+
+        let row = store.reviewGroups.flatMap(\.rows).first
+        XCTAssertEqual(row?.nodeOnline, false)
+        XCTAssertTrue(row?.stateLine.hasPrefix("as of") ?? false,
+                      "expected a last-seen label, got \(row?.stateLine ?? "nil")")
+    }
+
+    func testALiveNodesSessionStillReadsRunning() {
+        let store = makeStore()
+        var node = manualNode(nodeID: "X")
+        node.sessions = [session("a", cwd: "/w/alpha")]
+        node.online = true
+        store.seed(node)
+        XCTAssertEqual(store.reviewGroups.flatMap(\.rows).first?.stateLine,
+                       "running")
+    }
+}
+
+// MARK: - This Mac over loopback
+
+extension FleetStoreTests {
+
+    func testThisMacIsReachedOverLoopback() {
+        let own = LocalAddresses.hostnames.first { $0.hasSuffix(".local") }
+            ?? "localhost"
+        let advertised = URL(string: "http://\(own):7787")!
+        XCTAssertEqual(FleetStore.preferLoopback(advertised).host, "127.0.0.1")
+        XCTAssertEqual(FleetStore.preferLoopback(advertised).port, 7787)
+    }
+
+    func testAnotherMacKeepsItsAdvertisedHost() {
+        let remote = URL(string: "http://Mac-mini-M4-1.local:7787")!
+        XCTAssertEqual(FleetStore.preferLoopback(remote).host,
+                       "Mac-mini-M4-1.local")
+    }
+}

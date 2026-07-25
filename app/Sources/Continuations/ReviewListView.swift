@@ -44,20 +44,22 @@ struct ReviewListView: View {
     @ViewBuilder
     private func sessionRow(_ row: ReviewRow) -> some View {
         HStack(alignment: .top, spacing: 8) {
-            Image(systemName: row.review.map { ReviewKindIcon.name($0.kind) }
-                  ?? "circle.dashed")
-                .foregroundStyle(row.isWaiting ? .primary : .secondary)
+            Image(systemName: row.nodeOnline
+                  ? (row.review.map { ReviewKindIcon.name($0.kind) }
+                     ?? "circle.dashed")
+                  : "clock.arrow.circlepath")
+                .foregroundStyle(row.isWaiting && row.nodeOnline
+                                 ? .primary : .secondary)
                 .padding(.top, 1)
             VStack(alignment: .leading, spacing: 2) {
                 Text(row.title)
                     .lineLimit(2)
-                    .foregroundStyle(row.isWaiting ? .primary : .secondary)
+                    .foregroundStyle(row.isWaiting && row.nodeOnline
+                                     ? .primary : .secondary)
                 HStack(spacing: 4) {
                     Text(row.agent)
-                    if row.canReceiveMessage {
-                        Text("· can be messaged")
-                    } else if !row.isWaiting {
-                        Text("· running")
+                    if !row.stateLine.isEmpty {
+                        Text("· " + row.stateLine)
                     }
                 }
                 .font(.caption2)

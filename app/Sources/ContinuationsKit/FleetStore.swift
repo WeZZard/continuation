@@ -293,19 +293,25 @@ public final class FleetStore: ObservableObject {
     public var reviewGroups: [ReviewGroup] {
         var byProject: [String: [ReviewRow]] = [:]
         for row in sessionRows {
+            let host = node(key: row.nodeKey)
             byProject[row.session.cwd, default: []].append(
                 ReviewRow(nodeKey: row.nodeKey, nodeName: row.nodeName,
-                          isLocal: node(key: row.nodeKey)?.isLocal ?? false,
+                          isLocal: host?.isLocal ?? false,
                           agent: row.session.agent,
                           sessionRef: row.session.sessionRef,
-                          cwd: row.session.cwd, review: row.review))
+                          cwd: row.session.cwd, review: row.review,
+                          nodeOnline: host?.online ?? false,
+                          lastSeen: host?.lastSeen))
         }
         for row in orphanReviewRows {
+            let host = node(key: row.nodeKey)
             byProject[row.item.cwd, default: []].append(
                 ReviewRow(nodeKey: row.nodeKey, nodeName: row.nodeName,
                           isLocal: row.isLocal, agent: row.item.agent,
                           sessionRef: row.item.sessionRef,
-                          cwd: row.item.cwd, review: row.item))
+                          cwd: row.item.cwd, review: row.item,
+                          nodeOnline: host?.online ?? false,
+                          lastSeen: host?.lastSeen))
         }
         return byProject
             .map { path, rows in
@@ -367,7 +373,22 @@ public final class FleetStore: ObservableObject {
             }
         }
         upsert(key: key, source: .bonjour,
-               url: service.url, fallbackName: service.name)
+               url: Self.preferLoopback(service.url), fallbackName: service.name)
+    }
+
+    /// This Mac is reached over loopback, never over its own mDNS name.
+    /// Resolving `<host>.local` costs a round trip through the resolver
+    /// for a server one hop away, and when that resolution stalls the
+    /// local node goes dark while every remote node stays reachable —
+    /// which is exactly how it failed (2026-07-26).
+    static func preferLoopback(_ url: URL) -> URL {
+        var host = (url.host ?? "").components(separatedBy: "%").first ?? ""
+        if host.hasSuffix(".") { host.removeLast() }
+        guard LocalAddresses.hostnames.contains(host.lowercased())
+                || LocalAddresses.all.contains(host) else { return url }
+        var parts = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        parts?.host = "127.0.0.1"
+        return parts?.url ?? url
     }
 
     /// Remove a row without touching persisted manual addresses.
@@ -420,8 +441,10 @@ public final class FleetStore: ObservableObject {
     private func runLoopOnce(key: String) async {
         guard let state = node(key: key) else { return }
         let client = NodeClient(baseURL: state.url)
+        let wasOnline = state.online
         do {
             let info = try await client.node()
+            if !wasOnline { NSLog("[fleet] %@ reachable again", key) }
             let queue = try await client.queue()
             // Older serves lack /v1/reviews; that never fails the poll.
             let reviews = (try? await client.reviews()) ?? []
@@ -467,6 +490,10 @@ public final class FleetStore: ObservableObject {
                 }
             }
         } catch {
+            if wasOnline {
+                NSLog("[fleet] %@ went offline: %@", key,
+                      error.localizedDescription)
+            }
             update(key: key) { node in node.online = false }
             saveSnapshot(key: key)
         }
