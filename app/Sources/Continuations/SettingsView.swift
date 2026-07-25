@@ -74,15 +74,6 @@ struct NodesSettingsView: View {
 
 // ---------------------------------------------------------------- agents
 
-/// What the banner claims about this Mac, derived from one snapshot.
-enum AgentsBanner: Equatable {
-    case checking
-    case fresh          // a detected agent is unwired → Set Up This Mac
-    case updateAvailable
-    case current
-    case noPayload      // not running from a bundled app
-}
-
 @MainActor
 final class InstallerModel: ObservableObject {
     @Published var snapshot: InstallerSnapshot?
@@ -93,21 +84,6 @@ final class InstallerModel: ObservableObject {
     let engine = InstallerEngine()
 
     var transcript: String { engine.transcript }
-
-    var banner: AgentsBanner {
-        guard let snap = snapshot else { return .checking }
-        if snap.bundledCLIVersion == nil { return .noPayload }
-        let detected = [snap.claude, snap.pi].filter(\.detected)
-        if detected.contains(where: { $0.wiring == .notInstalled }) { return .fresh }
-        if let installed = snap.installedCLIVersion,
-           installed != snap.bundledCLIVersion { return .updateAvailable }
-        // pi wiring is live; only Claude's version-keyed cache can lag.
-        if case .installed(let version) = snap.claude.wiring,
-           version != nil, version != snap.bundledPluginVersion {
-            return .updateAvailable
-        }
-        return .current
-    }
 
     func refresh() {
         let engine = self.engine
@@ -143,32 +119,6 @@ final class InstallerModel: ObservableObject {
             }
             let snap = engine.snapshot()
             await self?.apply(snapshot: snap, failure: failure, endBusy: true)
-        }
-    }
-
-    func setUpThisMac() {
-        let wireable = snapshot.map { snap in
-            (claude: snap.claude.wiring == .notInstalled,
-             pi: snap.pi.wiring == .notInstalled)
-        } ?? (claude: false, pi: false)
-        perform("Set up") { engine in
-            try engine.materialize()
-            try engine.linkCLI()
-            var ok = true
-            if wireable.claude { ok = engine.wireClaude() && ok }
-            if wireable.pi { ok = engine.wirePi() && ok }
-            return ok
-        }
-    }
-
-    func updateAll() {
-        let claudeInstalled = snapshot.map { snap in
-            if case .installed = snap.claude.wiring { return true } else { return false }
-        } ?? false
-        perform("Update") { engine in
-            try engine.materialize()
-            try engine.linkCLI()
-            return claudeInstalled ? engine.updateClaude() : true
         }
     }
 
@@ -222,18 +172,8 @@ struct GeneralSettingsView: View {
     @State private var revealPhase: [AgentLogo: Int] = [:]
     @State private var copiedFlash: Set<AgentLogo> = []
 
-    /// The banner exists only when something needs doing; a healthy Mac
-    /// shows no recap.
-    private var showsBanner: Bool {
-        switch model.banner {
-        case .fresh, .updateAvailable, .noPayload: return true
-        case .checking, .current: return false
-        }
-    }
-
     var body: some View {
         VStack(spacing: 0) {
-            if showsBanner { bannerView }
             Form {
                 agentSections
             }
@@ -262,46 +202,6 @@ struct GeneralSettingsView: View {
             Text("Removes the wiring from the agent. No files are deleted.")
         }
         .onAppear { model.refresh() }
-    }
-
-    // ------------------------------------------------------------- banner
-
-    @ViewBuilder private var bannerView: some View {
-        HStack(spacing: 12) {
-            switch model.banner {
-            case .noPayload:
-                Image(systemName: "shippingbox").foregroundStyle(.secondary)
-                Text("This build carries no payload — run a bundled app to install.")
-                    .foregroundStyle(.secondary)
-                Spacer()
-            case .fresh:
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-                Text("This Mac isn't fully set up for agent scheduling.")
-                Spacer()
-                Button("Set Up This Mac") { model.setUpThisMac() }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(model.busy)
-            case .updateAvailable:
-                Image(systemName: "arrow.up.circle.fill").foregroundStyle(.blue)
-                Text(updateText)
-                Spacer()
-                Button("Update All") { model.updateAll() }
-                    .disabled(model.busy)
-            case .checking, .current:
-                EmptyView()
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .background(.quaternary.opacity(0.4))
-    }
-
-    private var updateText: String {
-        let bundled = model.snapshot?.bundledCLIVersion ?? "?"
-        let installed = model.snapshot?.installedCLIVersion
-            ?? model.snapshot?.installedPluginVersion ?? "?"
-        return "Update available — this app carries \(bundled); this Mac runs \(installed)."
     }
 
     // ------------------------------------------------------- agent rows
