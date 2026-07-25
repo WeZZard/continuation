@@ -33,12 +33,18 @@ public final class BonjourDiscovery: ObservableObject {
     private var browser: NWBrowser?
     private var resolving: Set<String> = []
 
-    public init() {}
+    /// The service type is injectable so tests advertise and browse a
+    /// test-only type — a test must never appear as a production node.
+    public let type: String
+
+    public init(type: String = "_agentic-cont._tcp") {
+        self.type = type
+    }
 
     public func start() {
         guard browser == nil else { return }
         let browser = NWBrowser(
-            for: .bonjourWithTXTRecord(type: "_agentic-cont._tcp", domain: nil),
+            for: .bonjourWithTXTRecord(type: type, domain: nil),
             using: NWParameters(tls: nil, tcp: NWProtocolTCP.Options()))
         browser.stateUpdateHandler = { state in
             discoveryLog("browser state: \(String(describing: state))")
@@ -78,7 +84,7 @@ public final class BonjourDiscovery: ObservableObject {
     }
 
     private func resolve(_ endpoint: NWEndpoint, name: String, nodeID: String?) {
-        ServiceResolver.resolve(name: name) { [weak self] resolved in
+        ServiceResolver.resolve(type: type, name: name) { [weak self] resolved in
             Task { @MainActor in
                 guard let self else { return }
                 self.resolving.remove(name)

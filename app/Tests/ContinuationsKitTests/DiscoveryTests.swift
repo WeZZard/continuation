@@ -15,12 +15,12 @@ final class DiscoveryTests: XCTestCase {
         txt["nodeid"] = "TESTNODE123"
         let listener = try NWListener(using: .tcp)
         listener.service = NWListener.Service(
-            name: name, type: "_agentic-cont._tcp", txtRecord: txt.data)
+            name: name, type: "_agentic-cont-test._tcp", txtRecord: txt.data)
         listener.newConnectionHandler = { $0.cancel() }
         listener.start(queue: .main)
         defer { listener.cancel() }
 
-        let discovery = BonjourDiscovery()
+        let discovery = BonjourDiscovery(type: "_agentic-cont-test._tcp")
         discovery.start()
         defer { discovery.stop() }
 
