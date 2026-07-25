@@ -188,3 +188,9 @@ Claude Code caches the installed plugin by version: after editing the
 skill, bump `plugins/continuation/.claude-plugin/plugin.json` and run
 `claude plugin update continuation@continuation`. pi references
 local packages in place, so it tracks the repo live.
+
+## License
+
+GNU Affero General Public License v3.0 or later — see `LICENSE`. The
+Claude mark bundled as an agent logo remains Anthropic's and is used
+only to identify the product; it is not covered by this license.
