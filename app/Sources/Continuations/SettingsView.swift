@@ -178,9 +178,18 @@ struct AgentsSettingsView: View {
     @StateObject private var model = InstallerModel()
     @State private var confirmUninstall: AgentLogo?
 
+    /// The banner exists only when something needs doing; a healthy Mac
+    /// shows no recap.
+    private var showsBanner: Bool {
+        switch model.banner {
+        case .fresh, .updateAvailable, .noPayload: return true
+        case .checking, .current: return false
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            bannerView
+            if showsBanner { bannerView }
             Form {
                 commandLineSection
                 agentSections
@@ -225,13 +234,11 @@ struct AgentsSettingsView: View {
     @ViewBuilder private var bannerView: some View {
         HStack(spacing: 12) {
             switch model.banner {
-            case .checking:
-                ProgressView().controlSize(.small)
-                Text("Checking this Mac…").foregroundStyle(.secondary)
             case .noPayload:
                 Image(systemName: "shippingbox").foregroundStyle(.secondary)
                 Text("This build carries no payload — run a bundled app to install.")
                     .foregroundStyle(.secondary)
+                Spacer()
             case .fresh:
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
@@ -246,11 +253,9 @@ struct AgentsSettingsView: View {
                 Spacer()
                 Button("Update All") { model.updateAll() }
                     .disabled(!model.actionsAllowed || model.busy)
-            case .current:
-                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                Text("Everything is installed and current.")
+            case .checking, .current:
+                EmptyView()
             }
-            if model.banner != .fresh && model.banner != .updateAvailable { Spacer() }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
@@ -308,32 +313,10 @@ struct AgentsSettingsView: View {
 
     @ViewBuilder private var agentSections: some View {
         Section("Agent Plugins") {
-            agentRow(
-                logo: .claude,
-                title: "Claude Code",
-                status: model.snapshot?.claude,
-                wiringLine: { wiring in
-                    switch wiring {
-                    case .installed(let version):
-                        return "continuation@continuation · \(version ?? "?")"
-                    default:
-                        return "continuation:schedule"
-                    }
-                },
-                install: model.installClaude,
-                footnote: "New sessions pick up changes after restart.")
-            agentRow(
-                logo: .pi,
-                title: "pi",
-                status: model.snapshot?.pi,
-                wiringLine: { wiring in
-                    if case .installed = wiring {
-                        return "package · live from the installed copy"
-                    }
-                    return "continuation:schedule"
-                },
-                install: model.installPi,
-                footnote: nil)
+            agentRow(logo: .claude, title: "Claude Code",
+                     status: model.snapshot?.claude, install: model.installClaude)
+            agentRow(logo: .pi, title: "pi",
+                     status: model.snapshot?.pi, install: model.installPi)
             if let error = model.lastError {
                 HStack(spacing: 6) {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
@@ -346,78 +329,59 @@ struct AgentsSettingsView: View {
         }
     }
 
+    /// Two lines: agent identity left / agent version right, then plugin
+    /// location left / the one action button right.
     @ViewBuilder
     private func agentRow(logo: AgentLogo, title: String, status: AgentStatus?,
-                          wiringLine: (PluginWiring) -> String,
-                          install: @escaping () -> Void,
-                          footnote: String?) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+                          install: @escaping () -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 AgentLogoView(logo: logo)
                 Text(title)
-                if let version = status?.binaryVersion {
-                    Text(version).font(.caption).foregroundStyle(.secondary)
-                }
                 Spacer()
-            }
-            switch status?.wiring {
-            case .none:
-                Text("—").foregroundStyle(.secondary)
-            case .agentMissing:
-                HStack {
-                    Text("not found on this Mac — install it, then Refresh.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Install") {}.disabled(true)
+                if let version = status?.binaryVersion?
+                    .components(separatedBy: " ").first {
+                    Text(version).foregroundStyle(.secondary)
                 }
-            case .devCheckout(let path):
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 6) {
-                            Text("installed").font(.caption)
-                            StatusMark(ok: true, text: nil)
-                        }
-                        Text(abbreviate(path)).font(.caption2).foregroundStyle(.secondary)
-                    }
-                    Spacer()
+            }
+            HStack(spacing: 8) {
+                Text(locationLine(for: status))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                switch status?.wiring {
+                case .installed, .devCheckout:
                     Button("Uninstall…") { confirmUninstall = logo }
                         .disabled(!model.actionsAllowed || model.busy)
-                }
-            case .notInstalled:
-                HStack {
-                    Text(wiringLine(.notInstalled)).font(.caption)
-                    Text("not installed").font(.caption).foregroundStyle(.secondary)
-                    Spacer()
+                case .notInstalled:
                     Button("Install", action: install)
                         .disabled(!model.actionsAllowed || model.busy)
-                }
-            case .installed(let version):
-                HStack(spacing: 6) {
-                    Text(wiringLine(.installed(version: version))).font(.caption)
-                    if claudeLags(version) {
-                        Text("→ \(model.snapshot?.bundledPluginVersion ?? "?")")
-                            .font(.caption).foregroundStyle(.blue)
-                    } else {
-                        StatusMark(ok: true, text: "current")
-                    }
-                    Spacer()
-                    Button("Uninstall…") { confirmUninstall = logo }
-                        .disabled(!model.actionsAllowed || model.busy)
-                }
-                if let footnote {
-                    Text(footnote).font(.caption2).foregroundStyle(.secondary)
+                case .agentMissing:
+                    Button("Install", action: install).disabled(true)
+                case nil:
+                    EmptyView()
                 }
             }
         }
         .padding(.vertical, 2)
     }
 
-    /// Only a version-carrying (Claude) wiring can lag; pi's is live.
-    private func claudeLags(_ version: String?) -> Bool {
-        guard let version, let bundled = model.snapshot?.bundledPluginVersion
-        else { return false }
-        return version != bundled
+    private func locationLine(for status: AgentStatus?) -> String {
+        switch status?.wiring {
+        case .devCheckout(let path):
+            return abbreviate(path)
+        case .installed:
+            return abbreviate((model.snapshot?.payloadDir ?? "")
+                + "/plugins/continuation")
+        case .notInstalled:
+            return "not installed"
+        case .agentMissing:
+            return "not found on this Mac"
+        case nil:
+            return "—"
+        }
     }
 
     private func abbreviate(_ path: String) -> String {
