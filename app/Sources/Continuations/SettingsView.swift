@@ -329,27 +329,25 @@ struct AgentsSettingsView: View {
         }
     }
 
-    /// Two lines: agent identity left / agent version right, then plugin
-    /// location left / the one action button right.
+    /// The agent name's x-height: the logo matches it and sits on the
+    /// baseline, an inline mark rather than a badge.
+    private static let nameXHeight =
+        NSFont.systemFont(ofSize: NSFont.systemFontSize).xHeight
+
+    /// Line 1: logo + name + (version) left, the action button right.
+    /// Line 2: plugin location left, installed-state indicator right.
     @ViewBuilder
     private func agentRow(logo: AgentLogo, title: String, status: AgentStatus?,
                           install: @escaping () -> Void) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                AgentLogoView(logo: logo)
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                AgentLogoView(logo: logo, size: Self.nameXHeight)
+                    .alignmentGuide(.firstTextBaseline) { $0[.bottom] }
                 Text(title)
-                Spacer()
                 if let version = status?.binaryVersion?
                     .components(separatedBy: " ").first {
-                    Text(version).foregroundStyle(.secondary)
+                    Text("(\(version))").foregroundStyle(.secondary)
                 }
-            }
-            HStack(spacing: 8) {
-                Text(locationLine(for: status))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
                 Spacer()
                 switch status?.wiring {
                 case .installed, .devCheckout:
@@ -364,8 +362,35 @@ struct AgentsSettingsView: View {
                     EmptyView()
                 }
             }
+            HStack(spacing: 8) {
+                Text(locationLine(for: status))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                statusIndicator(installed: isWired(status))
+            }
         }
         .padding(.vertical, 2)
+    }
+
+    private func isWired(_ status: AgentStatus?) -> Bool {
+        switch status?.wiring {
+        case .installed, .devCheckout: return true
+        default: return false
+        }
+    }
+
+    private func statusIndicator(installed: Bool) -> some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(installed ? Color.green : Color.secondary.opacity(0.4))
+                .frame(width: 7, height: 7)
+            Text(installed ? "Installed" : "Not Installed")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 
     private func locationLine(for status: AgentStatus?) -> String {
@@ -376,7 +401,7 @@ struct AgentsSettingsView: View {
             return abbreviate((model.snapshot?.payloadDir ?? "")
                 + "/plugins/continuation")
         case .notInstalled:
-            return "not installed"
+            return "—"
         case .agentMissing:
             return "not found on this Mac"
         case nil:
@@ -424,6 +449,9 @@ enum AgentLogo {
 
 struct AgentLogoView: View {
     let logo: AgentLogo
+    var size: CGFloat = 22
+
+    private var corner: CGFloat { size * 0.23 }
 
     var body: some View {
         switch logo {
@@ -433,21 +461,22 @@ struct AgentLogoView: View {
                 Image(nsImage: image)
                     .resizable()
                     .interpolation(.high)
-                    .frame(width: 22, height: 22)
-                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .frame(width: size, height: size)
+                    .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
             } else {
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                RoundedRectangle(cornerRadius: corner, style: .continuous)
                     .fill(Color(red: 0.80, green: 0.42, blue: 0.30))
-                    .frame(width: 22, height: 22)
-                    .overlay(Text("✳︎").font(.system(size: 12)).foregroundStyle(.white))
+                    .frame(width: size, height: size)
+                    .overlay(Text("✳︎").font(.system(size: size * 0.55))
+                        .foregroundStyle(.white))
             }
         case .pi:
-            RoundedRectangle(cornerRadius: 5, style: .continuous)
+            RoundedRectangle(cornerRadius: corner, style: .continuous)
                 .fill(Color(white: 0.13))
-                .frame(width: 22, height: 22)
+                .frame(width: size, height: size)
                 .overlay(
                     Text("π")
-                        .font(.system(size: 14, weight: .semibold, design: .serif))
+                        .font(.system(size: size * 0.64, weight: .semibold, design: .serif))
                         .foregroundStyle(.white))
         }
     }
