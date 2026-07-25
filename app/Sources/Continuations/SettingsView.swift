@@ -4,10 +4,10 @@ import SwiftUI
 struct SettingsView: View {
     var body: some View {
         TabView {
-            NodesSettingsView()
-                .tabItem { Label("Nodes", systemImage: "point.3.connected.trianglepath.dotted") }
             AgentsSettingsView()
                 .tabItem { Label("Agents", systemImage: "puzzlepiece.extension") }
+            NodesSettingsView()
+                .tabItem { Label("Nodes", systemImage: "point.3.connected.trianglepath.dotted") }
         }
         .frame(width: 560)
     }
@@ -177,6 +177,7 @@ final class InstallerModel: ObservableObject {
 struct AgentsSettingsView: View {
     @StateObject private var model = InstallerModel()
     @State private var confirmUninstall: AgentLogo?
+    @State private var revealsLocation: Set<AgentLogo> = []
 
     /// The banner exists only when something needs doing; a healthy Mac
     /// shows no recap.
@@ -329,51 +330,64 @@ struct AgentsSettingsView: View {
         }
     }
 
-    /// The agent name's cap height: the logo matches it and sits on the
-    /// baseline, an inline mark rather than a badge.
+    /// The agent name's cap height, rounded to whole points: the logo
+    /// matches it and sits on the baseline, an inline mark, not a badge.
     private static let nameCapHeight =
-        NSFont.systemFont(ofSize: NSFont.systemFontSize).capHeight
+        NSFont.systemFont(ofSize: NSFont.systemFontSize).capHeight.rounded()
 
-    /// Line 1: logo + name + (version) left, installed-state right.
-    /// Line 2: plugin location (truncatable) left, the action button right.
+    /// Line 1: logo + name + (version) left, the action button right.
+    /// Line 2: the installed-state indicator; clicking it swaps in the
+    /// plugin location, clicking again swaps back.
     @ViewBuilder
     private func agentRow(logo: AgentLogo, title: String, status: AgentStatus?,
                           install: @escaping () -> Void) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                AgentLogoView(logo: logo, size: Self.nameCapHeight)
-                    .alignmentGuide(.firstTextBaseline) { $0[.bottom] }
-                Text(title)
-                if let version = status?.binaryVersion?
-                    .components(separatedBy: " ").first {
-                    Text("(\(version))").foregroundStyle(.secondary)
-                }
-                Spacer()
-                statusIndicator(installed: isWired(status))
-            }
-            HStack(spacing: 8) {
-                Text(locationLine(for: status))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer()
-                Group {
-                    switch status?.wiring {
-                    case .installed, .devCheckout:
-                        Button("Uninstall…") { confirmUninstall = logo }
-                            .disabled(!model.actionsAllowed || model.busy)
-                    case .notInstalled:
-                        Button("Install", action: install)
-                            .disabled(!model.actionsAllowed || model.busy)
-                    case .agentMissing:
-                        Button("Install", action: install).disabled(true)
-                    case nil:
-                        EmptyView()
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    AgentLogoView(logo: logo, size: Self.nameCapHeight)
+                        .alignmentGuide(.firstTextBaseline) { $0[.bottom] }
+                    Text(title)
+                    if let version = status?.binaryVersion?
+                        .components(separatedBy: " ").first {
+                        Text("(\(version))").foregroundStyle(.secondary)
                     }
                 }
-                .fixedSize()
+                Button {
+                    if revealsLocation.contains(logo) {
+                        revealsLocation.remove(logo)
+                    } else {
+                        revealsLocation.insert(logo)
+                    }
+                } label: {
+                    if revealsLocation.contains(logo) {
+                        Text(locationLine(for: status))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    } else {
+                        statusIndicator(installed: isWired(status))
+                    }
+                }
+                .buttonStyle(.plain)
             }
+            Spacer()
+            // Vertically centered against the whole cell.
+            Group {
+                switch status?.wiring {
+                case .installed, .devCheckout:
+                    Button("Uninstall…") { confirmUninstall = logo }
+                        .disabled(!model.actionsAllowed || model.busy)
+                case .notInstalled:
+                    Button("Install", action: install)
+                        .disabled(!model.actionsAllowed || model.busy)
+                case .agentMissing:
+                    Button("Install", action: install).disabled(true)
+                case nil:
+                    EmptyView()
+                }
+            }
+            .fixedSize()
         }
         .padding(.vertical, 2)
     }

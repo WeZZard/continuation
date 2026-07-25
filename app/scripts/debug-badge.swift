@@ -30,18 +30,8 @@ for file in files {
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = context
     let rect = NSRect(x: 0, y: 0, width: width, height: height)
-    source.draw(in: rect)
 
-    // The stripe ring hugs the squircle, not the canvas: macOS icon art
-    // sits inside ~10% transparent margins.
-    NSGraphicsContext.saveGraphicsState()
-    let margin = size * 0.085
-    let band = size * 0.09
-    let outer = rect.insetBy(dx: margin, dy: margin)
-    let ring = NSBezierPath(rect: outer)
-    ring.appendRect(outer.insetBy(dx: band, dy: band))
-    ring.windingRule = .evenOdd
-    ring.addClip()
+    // Stripes over the whole canvas first.
     NSColor(calibratedRed: 0.99, green: 0.78, blue: 0.05, alpha: 1).setFill()
     rect.fill()
     NSColor.black.setFill()
@@ -57,10 +47,18 @@ for file in files {
         path.fill()
         x += stripe * 2
     }
-    NSGraphicsContext.restoreGraphicsState()
 
-    // Clip the stripes to the icon's own silhouette (rounded corners etc.).
+    // Both ring edges follow the icon's continuous-corner curve: the outer
+    // edge is the icon's own silhouette; the inner edge is that same
+    // silhouette scaled inward by the band, so the corners stay aligned
+    // with the system icon shape.
     source.draw(in: rect, from: .zero, operation: .destinationIn, fraction: 1)
+    let band = size * 0.09
+    source.draw(in: rect.insetBy(dx: band, dy: band), from: .zero,
+                operation: .destinationOut, fraction: 1)
+
+    // The icon itself sits under the ring.
+    source.draw(in: rect, from: .zero, operation: .destinationOver, fraction: 1)
     NSGraphicsContext.restoreGraphicsState()
 
     if let png = canvas.representation(using: .png, properties: [:]) {
