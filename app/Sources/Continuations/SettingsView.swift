@@ -329,19 +329,19 @@ struct AgentsSettingsView: View {
         }
     }
 
-    /// The agent name's x-height: the logo matches it and sits on the
+    /// The agent name's cap height: the logo matches it and sits on the
     /// baseline, an inline mark rather than a badge.
-    private static let nameXHeight =
-        NSFont.systemFont(ofSize: NSFont.systemFontSize).xHeight
+    private static let nameCapHeight =
+        NSFont.systemFont(ofSize: NSFont.systemFontSize).capHeight
 
-    /// Line 1: logo + name + (version) left, the action button right.
-    /// Line 2: plugin location left, installed-state indicator right.
+    /// Line 1: logo + name + (version) left, installed-state right.
+    /// Line 2: plugin location (truncatable) left, the action button right.
     @ViewBuilder
     private func agentRow(logo: AgentLogo, title: String, status: AgentStatus?,
                           install: @escaping () -> Void) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                AgentLogoView(logo: logo, size: Self.nameXHeight)
+                AgentLogoView(logo: logo, size: Self.nameCapHeight)
                     .alignmentGuide(.firstTextBaseline) { $0[.bottom] }
                 Text(title)
                 if let version = status?.binaryVersion?
@@ -349,18 +349,7 @@ struct AgentsSettingsView: View {
                     Text("(\(version))").foregroundStyle(.secondary)
                 }
                 Spacer()
-                switch status?.wiring {
-                case .installed, .devCheckout:
-                    Button("Uninstall…") { confirmUninstall = logo }
-                        .disabled(!model.actionsAllowed || model.busy)
-                case .notInstalled:
-                    Button("Install", action: install)
-                        .disabled(!model.actionsAllowed || model.busy)
-                case .agentMissing:
-                    Button("Install", action: install).disabled(true)
-                case nil:
-                    EmptyView()
-                }
+                statusIndicator(installed: isWired(status))
             }
             HStack(spacing: 8) {
                 Text(locationLine(for: status))
@@ -369,7 +358,21 @@ struct AgentsSettingsView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer()
-                statusIndicator(installed: isWired(status))
+                Group {
+                    switch status?.wiring {
+                    case .installed, .devCheckout:
+                        Button("Uninstall…") { confirmUninstall = logo }
+                            .disabled(!model.actionsAllowed || model.busy)
+                    case .notInstalled:
+                        Button("Install", action: install)
+                            .disabled(!model.actionsAllowed || model.busy)
+                    case .agentMissing:
+                        Button("Install", action: install).disabled(true)
+                    case nil:
+                        EmptyView()
+                    }
+                }
+                .fixedSize()
             }
         }
         .padding(.vertical, 2)
