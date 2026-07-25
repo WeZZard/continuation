@@ -355,15 +355,19 @@ public struct ReviewItem: Codable, Hashable, Identifiable, Sendable {
 public struct ReviewPayload: Codable, Hashable, Sendable {
     public let questions: [ReviewQuestion]?
     public let plan: String?
+    /// Whether the session's hook is still waiting on this item. Only a
+    /// held session can be sent a message; the rest are presence.
+    public let held: Bool?
 
     public init(from decoder: Decoder) throws {
         let container = try? decoder.container(keyedBy: CodingKeys.self)
         questions = try? container?.decodeIfPresent(
             [ReviewQuestion].self, forKey: .questions)
         plan = try? container?.decodeIfPresent(String.self, forKey: .plan)
+        held = try? container?.decodeIfPresent(Bool.self, forKey: .held)
     }
 
-    enum CodingKeys: String, CodingKey { case questions, plan }
+    enum CodingKeys: String, CodingKey { case questions, plan, held }
 }
 
 public struct ReviewQuestion: Codable, Hashable, Sendable {

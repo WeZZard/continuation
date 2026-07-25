@@ -96,3 +96,83 @@ final class FleetStoreTests: XCTestCase {
         XCTAssertEqual(persistence.loadManualNodes().count, 1)
     }
 }
+
+// MARK: - Review, gathered by project
+
+extension FleetStoreTests {
+
+    private func session(_ ref: String, cwd: String) -> SupervisedSession {
+        SupervisedSession(sessionRef: ref, agent: "claude-code", cwd: cwd,
+                          source: "startup", startedAt: "2026-07-26T00:00:00Z")
+    }
+
+    private func review(_ id: Int, ref: String, cwd: String,
+                        kind: String = "stopped", held: Bool = false) -> ReviewItem {
+        let payload = """
+            {"held": \(held)}
+            """.data(using: .utf8)!
+        return ReviewItem(
+            id: id, sessionRef: ref, agent: "claude-code", kind: kind, cwd: cwd,
+            summary: "Waiting for your next message",
+            payload: try! JSONDecoder().decode(ReviewPayload.self, from: payload),
+            raisedAt: "2026-07-26T00:00:00Z")
+    }
+
+    func testSessionsGatherUnderTheirProject() {
+        let store = makeStore()
+        var node = manualNode(nodeID: "X")
+        node.sessions = [session("a", cwd: "/w/alpha"),
+                         session("b", cwd: "/w/beta"),
+                         session("c", cwd: "/w/alpha")]
+        node.reviews = [review(1, ref: "a", cwd: "/w/alpha")]
+        store.seed(node)
+
+        let groups = store.reviewGroups
+        XCTAssertEqual(groups.map(\.project), ["alpha", "beta"])
+        XCTAssertEqual(groups[0].rows.count, 2)
+        XCTAssertEqual(groups[0].waitingCount, 1)
+        // The one waiting on a human leads its project.
+        XCTAssertEqual(groups[0].rows.first?.sessionRef, "a")
+    }
+
+    func testProjectsWaitingSortFirst() {
+        let store = makeStore()
+        var node = manualNode(nodeID: "X")
+        node.sessions = [session("a", cwd: "/w/alpha"),
+                         session("z", cwd: "/w/zeta")]
+        node.reviews = [review(1, ref: "z", cwd: "/w/zeta")]
+        store.seed(node)
+        XCTAssertEqual(store.reviewGroups.map(\.project), ["zeta", "alpha"])
+        XCTAssertEqual(store.waitingCount, 1)
+    }
+
+    func testOnlyAHeldLocalSessionTakesAMessage() {
+        let store = makeStore()
+        var node = manualNode(nodeID: "X")
+        node.sessions = [session("a", cwd: "/w/alpha"), session("b", cwd: "/w/alpha")]
+        node.reviews = [review(1, ref: "a", cwd: "/w/alpha", held: true),
+                        review(2, ref: "b", cwd: "/w/alpha", held: false)]
+        store.seed(node)
+
+        let rows = store.reviewGroups.flatMap(\.rows)
+        // A manual node is not this Mac, so nothing is drivable yet.
+        XCTAssertEqual(rows.filter(\.canReceiveMessage).count, 0)
+        // Held-ness is carried per item, whatever the node.
+        XCTAssertEqual(rows.first { $0.sessionRef == "a" }?
+            .review?.payload.held, true)
+        XCTAssertEqual(rows.first { $0.sessionRef == "b" }?
+            .review?.payload.held, false)
+    }
+
+    func testAQuestionIsNotAMessageTarget() {
+        let store = makeStore()
+        var node = manualNode(nodeID: "X")
+        node.sessions = [session("a", cwd: "/w/alpha")]
+        node.reviews = [review(1, ref: "a", cwd: "/w/alpha",
+                               kind: "question", held: true)]
+        store.seed(node)
+        let row = store.reviewGroups.flatMap(\.rows).first
+        XCTAssertEqual(row?.review?.kind, "question")
+        XCTAssertFalse(row?.canReceiveMessage ?? true)
+    }
+}

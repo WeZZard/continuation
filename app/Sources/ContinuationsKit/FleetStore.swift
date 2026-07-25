@@ -286,6 +286,48 @@ public final class FleetStore: ObservableObject {
             }
     }
 
+    /// Supervised sessions gathered by the project they run in, because
+    /// that is how the work is remembered — not by which machine happens
+    /// to host it. Projects waiting on you sort first, then by name; a
+    /// project spans nodes freely, so each row keeps its own.
+    public var reviewGroups: [ReviewGroup] {
+        var byProject: [String: [ReviewRow]] = [:]
+        for row in sessionRows {
+            byProject[row.session.cwd, default: []].append(
+                ReviewRow(nodeKey: row.nodeKey, nodeName: row.nodeName,
+                          isLocal: node(key: row.nodeKey)?.isLocal ?? false,
+                          agent: row.session.agent,
+                          sessionRef: row.session.sessionRef,
+                          cwd: row.session.cwd, review: row.review))
+        }
+        for row in orphanReviewRows {
+            byProject[row.item.cwd, default: []].append(
+                ReviewRow(nodeKey: row.nodeKey, nodeName: row.nodeName,
+                          isLocal: row.isLocal, agent: row.item.agent,
+                          sessionRef: row.item.sessionRef,
+                          cwd: row.item.cwd, review: row.item))
+        }
+        return byProject
+            .map { path, rows in
+                ReviewGroup(path: path, rows: rows.sorted {
+                    ($0.review == nil ? 1 : 0, $0.sessionRef)
+                        < ($1.review == nil ? 1 : 0, $1.sessionRef)
+                })
+            }
+            .sorted {
+                ($0.waitingCount > 0 ? 0 : 1, $0.project)
+                    < ($1.waitingCount > 0 ? 0 : 1, $1.project)
+            }
+    }
+
+    /// What the Review tab badges: sessions actually waiting on a human.
+    public var waitingCount: Int { reviewRows.count }
+
+    public func reviewRow(nodeKey: String, reviewID: Int) -> ReviewRow? {
+        reviewGroups.flatMap(\.rows)
+            .first { $0.nodeKey == nodeKey && $0.review?.id == reviewID }
+    }
+
     /// What the menu bar counts down to: the soonest scheduled activation,
     /// or nil when something is already due (the countdown shows "due now").
     public var nextScheduled: FleetEntry? { scheduledEntries.first }

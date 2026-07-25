@@ -79,6 +79,60 @@ function waitSeconds() {
   return Number.isFinite(raw) && raw > 0 ? raw : 300;
 }
 
+/** Seconds an idle session is held open for the console, 0 for never.
+ *
+ *  Holding is what makes a message from the console land: the hook stays
+ *  alive, so there is something to deliver to. It costs the terminal,
+ *  though — Claude Code queues whatever is typed while a hook runs and
+ *  dispatches no event for it, so the session neither sees the typing
+ *  nor tells us about it until the hold ends (measured: a message typed
+ *  10s into a 60s hold was acted on at 61s). Hence off by default: hold
+ *  the sessions nobody is sitting in front of, watch the rest. */
+function holdSeconds() {
+  const raw = Number(process.env.CONTINUATION_REVIEW_HOLD ?? "0");
+  return Number.isFinite(raw) && raw > 0 ? raw : 0;
+}
+
+/** A session that stopped is idle, and idle is a review item. When the
+ *  session is held, the item is actionable: a message sent from the
+ *  console arrives as the session's next instruction. Otherwise it is
+ *  presence only, and the item says so, since an action that cannot
+ *  land is worse than none offered. */
+function idle(cli, session, cwd, summary) {
+  const seconds = holdSeconds();
+  runCLI(cli, ["review", "clear", "--session", session]);
+  const raised = runCLI(cli,
+    ["review", "raise", "--session", session, "--kind", "stopped",
+     "--cwd", cwd, "--summary", summary, "--payload", "-"],
+    { input: JSON.stringify({ held: seconds > 0 }) });
+  if (seconds === 0 || raised.status !== 0) return;
+  const reviewID = (raised.stdout ?? "").trim();
+
+  const waited = runCLI(cli, ["review", "wait", reviewID,
+                              "--timeout", String(seconds)],
+                        { timeout: (seconds + 15) * 1000 });
+  if (waited.status !== 0) {
+    // Cleared from the console, or held as long as we promised. Either
+    // way nothing is listening now, so the item leaves the queue.
+    runCLI(cli, ["review", "clear", "--session", session, "--kind", "stopped"]);
+    return;
+  }
+
+  let decision;
+  try {
+    decision = JSON.parse(waited.stdout ?? "");
+  } catch {
+    return;
+  }
+  const message = (decision.message ?? "").trim();
+  if (!message) return;
+  process.stdout.write(JSON.stringify({
+    decision: "block",
+    reason: "The user sent this from the Continuation review console — "
+            + `treat it as their next message:\n\n${message}`,
+  }));
+}
+
 function emit(permission, reason) {
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: {
@@ -186,11 +240,17 @@ async function main() {
     case "SessionStart":
       // A session that has just started or resumed is idle: it is
       // waiting for the human to push it into work, which is exactly
-      // what the review box is for.
-      runCLI(cli, ["review", "clear", "--session", session]);
-      runCLI(cli, ["review", "raise", "--session", session,
-                   "--kind", "stopped", "--cwd", cwd,
-                   "--summary", "Waiting for your first message"]);
+      // what the review box is for. It cannot be held here, whatever
+      // the setting — a hook that waits at SessionStart holds up the
+      // session's own startup, and Claude Code starts no turn for a
+      // message delivered this early. Driving begins at the first stop.
+      runCLI(cli,
+        ["review", "clear", "--session", session]);
+      runCLI(cli,
+        ["review", "raise", "--session", session, "--kind", "stopped",
+         "--cwd", cwd, "--summary", "Waiting for your first message",
+         "--payload", "-"],
+        { input: JSON.stringify({ held: false }) });
       return;
     case "PreToolUse":
       preToolUse(cli, data, session, cwd);
@@ -204,10 +264,7 @@ async function main() {
       return;
     }
     case "Stop":
-      runCLI(cli, ["review", "clear", "--session", session]);
-      runCLI(cli, ["review", "raise", "--session", session,
-                   "--kind", "stopped", "--cwd", cwd,
-                   "--summary", "Waiting for your next message"]);
+      idle(cli, session, cwd, "Waiting for your next message");
       return;
     case "UserPromptSubmit":
       runCLI(cli, ["review", "clear", "--session", session]);

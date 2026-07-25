@@ -14,8 +14,11 @@ struct CaptureSection: View {
 
 
     private var command: String? {
-        CaptureLaunch.command(for: .claude, pluginDirectory: pluginDirectory)
+        CaptureLaunch.command(for: .claude, pluginDirectory: pluginDirectory,
+                              held: driveFromConsole)
     }
+
+    @AppStorage("captureDriveFromConsole") private var driveFromConsole = false
 
     var body: some View {
         Section {
@@ -36,6 +39,18 @@ struct CaptureSection: View {
                         .fixedSize()
                 }
                 .padding(.vertical, 4)
+                Toggle("Let the console drive this session", isOn: $driveFromConsole)
+                Text(driveFromConsole
+                     ? "The session stays reachable between turns, so you can "
+                       + "send it messages from the review box. Its terminal "
+                       + "holds anything typed there until the next turn, so "
+                       + "use this for sessions you are not sitting in front of."
+                     : "The session reports what it waits on, and you answer "
+                       + "its questions and plans from the review box. Sending "
+                       + "it a message needs the option above.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if let failure {
                 HStack(alignment: .top, spacing: 6) {

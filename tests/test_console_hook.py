@@ -197,3 +197,84 @@ def test_guarded_sessions_never_register(cli, store):
                      "session_id": "sess-guard", "cwd": "/tmp"},
              extra_env={"AGENTIC_TASK_ID": "task"})
     assert sessions(cli) == []
+
+
+def test_an_idle_session_is_watched_but_not_held_by_default(cli, store):
+    """Holding freezes the terminal — Claude Code queues typed input while
+    a hook runs — so a session nobody asked to hold returns at once and
+    says plainly that it cannot take a message."""
+    result = run_hook(store, {"hook_event_name": "Stop",
+                              "session_id": "sess-idle", "cwd": "/tmp/p"},
+                      timeout=15)
+    assert result.returncode == 0
+    assert result.stdout.strip() == ""
+    reviews = open_reviews(cli)
+    assert [r["summary"] for r in reviews] == ["Waiting for your next message"]
+    assert reviews[0]["payload"] == {"held": False}
+
+
+def test_a_held_session_takes_a_message_from_the_console(cli, store):
+    """The whole point of holding: the hook is still alive, so a message
+    typed in the app becomes the session's next instruction."""
+    def send_from_console():
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            reviews = open_reviews(cli)
+            if reviews:
+                cli("review", "answer", str(reviews[0]["id"]),
+                    "--decision", "-",
+                    stdin=json.dumps({"message": "Run the tests again."}))
+                return
+            time.sleep(0.2)
+
+    thread = threading.Thread(target=send_from_console)
+    thread.start()
+    result = run_hook(store, {"hook_event_name": "Stop",
+                              "session_id": "sess-held", "cwd": "/tmp/p"},
+                      extra_env={"CONTINUATION_REVIEW_HOLD": "20"}, timeout=40)
+    thread.join()
+
+    decision = json.loads(result.stdout)
+    assert decision["decision"] == "block"
+    assert "Run the tests again." in decision["reason"]
+
+
+def test_a_held_item_says_so(cli, store):
+    """The console offers Send only where it would land."""
+    def read_then_clear():
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            reviews = open_reviews(cli)
+            if reviews:
+                assert reviews[0]["payload"] == {"held": True}
+                cli("review", "clear", "--session", "sess-held-flag")
+                return
+            time.sleep(0.2)
+
+    thread = threading.Thread(target=read_then_clear)
+    thread.start()
+    run_hook(store, {"hook_event_name": "Stop",
+                     "session_id": "sess-held-flag", "cwd": "/tmp/p"},
+             extra_env={"CONTINUATION_REVIEW_HOLD": "20"}, timeout=40)
+    thread.join()
+
+
+def test_a_cleared_hold_leaves_the_queue(cli, store):
+    """A typed message clears the item; when the hold ends there is
+    nothing left claiming the session waits on a human."""
+    def clear_it():
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            if open_reviews(cli):
+                cli("review", "clear", "--session", "sess-cleared")
+                return
+            time.sleep(0.2)
+
+    thread = threading.Thread(target=clear_it)
+    thread.start()
+    result = run_hook(store, {"hook_event_name": "Stop",
+                              "session_id": "sess-cleared", "cwd": "/tmp/p"},
+                      extra_env={"CONTINUATION_REVIEW_HOLD": "20"}, timeout=40)
+    thread.join()
+    assert result.stdout.strip() == ""
+    assert open_reviews(cli) == []

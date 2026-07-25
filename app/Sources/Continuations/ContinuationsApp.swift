@@ -33,11 +33,13 @@ struct ContinuationsApp: App {
 enum DetailSelection: Hashable {
     case entry(String)                       // FleetEntry.id
     case task(nodeKey: String, taskID: String)
+    case review(nodeKey: String, reviewID: Int)
 }
 
 enum SidebarSelection: Hashable {
     case all
     case state(String)                       // "expired" | "invalid" | "paused"
+    case review
     case activity
     case node(String)                        // NodeState.key
 }

@@ -30,6 +30,9 @@ struct RootView: View {
         case .state(let state):
             UnifiedQueueView(scope: .state(state), selection: $detail)
                 .navigationTitle(state.capitalized)
+        case .review:
+            ReviewListView(selection: $detail)
+                .navigationTitle("Review")
         case .activity:
             ActivityView()
                 .navigationTitle("Activity")
@@ -54,6 +57,16 @@ struct RootView: View {
         case .task(let nodeKey, let taskID):
             TaskDetailView(nodeKey: nodeKey, taskID: taskID)
                 .id("\(nodeKey)/\(taskID)")
+        case .review(let nodeKey, let reviewID):
+            if let row = store.reviewRow(nodeKey: nodeKey, reviewID: reviewID) {
+                ReviewConsoleView(row: row)
+                    .id(row.id)
+            } else {
+                ContentUnavailableView(
+                    "Nothing waiting",
+                    systemImage: "checkmark.circle",
+                    description: Text("The session moved on by itself."))
+            }
         case nil:
             ContentUnavailableView(
                 "No selection",

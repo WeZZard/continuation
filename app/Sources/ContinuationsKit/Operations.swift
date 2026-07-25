@@ -200,13 +200,23 @@ public enum AgentCellGeometry {
 /// launch, never installed. The Capture panel hands out the command.
 public enum CaptureLaunch {
 
+    /// Seconds a driven session stays reachable between turns.
+    public static let holdSeconds = 1800
+
     /// nil when the agent has no hook surface this plugin can use.
-    public static func command(for agent: AgentKind, pluginDirectory: URL) -> String? {
+    ///
+    /// `held: true` keeps the session reachable from the console after
+    /// every turn, which is what makes Send work — at the price of the
+    /// terminal, since Claude Code queues anything typed while a hook
+    /// runs. Use it for sessions nobody is sitting in front of.
+    public static func command(for agent: AgentKind, pluginDirectory: URL,
+                               held: Bool = false) -> String? {
         switch agent {
         case .claude:
             let path = pluginDirectory.path
             let quoted = path.contains(" ") ? "'\(path)'" : path
-            return "claude --plugin-dir \(quoted)"
+            let prefix = held ? "CONTINUATION_REVIEW_HOLD=\(holdSeconds) " : ""
+            return "\(prefix)claude --plugin-dir \(quoted)"
         case .pi:
             return nil
         }

@@ -216,6 +216,23 @@ A started session is itself a review item: it is idle, waiting for the
 human to push it into work, so `SessionStart` raises one the same way
 `Stop` does.
 
+The box is the app's **Review** tab, beside All Continuations and
+Activity, and it gathers sessions by the project they run in rather than
+by the machine that hosts them — a project spans nodes freely, so each
+row keeps its own. Selecting one opens its console: answer its
+questions (single or multi-select, or write your own), approve its plan
+or send it back with feedback, or send the session its next message.
+
+Sending a message needs the session to be **held**, which is opt-in:
+`CONTINUATION_REVIEW_HOLD=<seconds>` (the Agent settings panel writes it
+into the launch command). A held session's `Stop` hook stays alive
+between turns, so the message arrives as its next instruction. The cost
+is the terminal — Claude Code queues anything typed while a hook runs
+and dispatches no event for it, so a message typed 10s into a 60s hold
+was acted on at 61s. Hold the sessions nobody is sitting in front of;
+watch the rest, where questions and plans stay actionable because those
+hooks block anyway.
+
 **A session in an untrusted workspace can never appear.** Claude Code
 refuses to run any hook where workspace trust has not been accepted —
 its debug log says `Skipping SessionStart:startup hook execution -
