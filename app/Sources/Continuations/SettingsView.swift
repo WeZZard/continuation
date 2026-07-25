@@ -33,7 +33,7 @@ struct NodesSettingsView: View {
                                     Text("(This Mac)").foregroundStyle(.secondary)
                                 }
                             }
-                            Text("\(node.source.rawValue) · \(node.url.absoluteString)")
+                            Text(node.url.absoluteString)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
