@@ -5,6 +5,7 @@
 
 import Combine
 import Foundation
+import SystemConfiguration
 
 public enum NodeSource: String, Codable, Sendable {
     case bonjour
@@ -28,13 +29,15 @@ public struct NodeState: Identifiable, Hashable {
         return queue.due.count + queue.scheduled.count + queue.attention.count
     }
 
-    /// This machine — reached over loopback or any of its own interface
-    /// addresses (a discovered face carries a LAN address). Pinned first
-    /// in the fleet and labeled "This Mac".
+    /// This machine — reached over loopback, any of its own interface
+    /// addresses, or its own mDNS hostname (a discovered face resolves to
+    /// `<host>.local`). Pinned first in the fleet, labeled "This Mac".
     public var isLocal: Bool {
-        let host = (url.host ?? "").components(separatedBy: "%").first ?? ""
+        var host = (url.host ?? "").components(separatedBy: "%").first ?? ""
+        if host.hasSuffix(".") { host.removeLast() }
         return ["127.0.0.1", "localhost", "::1"].contains(host)
             || LocalAddresses.all.contains(host)
+            || LocalAddresses.hostnames.contains(host.lowercased())
     }
 }
 
@@ -63,6 +66,28 @@ public enum LocalAddresses {
             }
         }
         return addresses
+    }()
+
+    /// The machine's own names, lowercased, with and without `.local`.
+    /// The Bonjour hosttarget comes from the LocalHostName, which need
+    /// not match gethostname — both are collected.
+    public static let hostnames: Set<String> = {
+        var names: Set<String> = []
+        var buffer = [CChar](repeating: 0, count: 256)
+        if gethostname(&buffer, buffer.count) == 0 {
+            names.insert(String(cString: buffer).lowercased())
+        }
+        if let local = SCDynamicStoreCopyLocalHostName(nil) {
+            names.insert((local as String).lowercased())
+        }
+        for name in Host.current().names {
+            names.insert(name.lowercased())
+        }
+        for name in names {
+            names.insert(name.hasSuffix(".local")
+                ? String(name.dropLast(6)) : name + ".local")
+        }
+        return names
     }()
 }
 
@@ -211,6 +236,11 @@ public final class FleetStore: ObservableObject {
         }
     }
 
+    /// Test seam: the merge logic is exercised directly by unit tests.
+    func seed(_ node: NodeState) {
+        nodes.append(node)
+    }
+
     // ------------------------------------------------------------- node loops
 
     private func upsertManual(_ manual: ManualNode) {
@@ -219,7 +249,7 @@ public final class FleetStore: ObservableObject {
                fallbackName: manual.host)
     }
 
-    private func upsertBonjour(_ service: DiscoveredService) {
+    func upsertBonjour(_ service: DiscoveredService) {
         let key = "bonjour:\(service.name)"
         guard !suppressedKeys.contains(key) else { return }
         // Discovery outranks a by-address entry for the same node id: the
@@ -236,7 +266,7 @@ public final class FleetStore: ObservableObject {
     }
 
     /// Remove a row without touching persisted manual addresses.
-    private func displace(key: String) {
+    func displace(key: String) {
         loops[key]?.cancel()
         loops[key] = nil
         nodes.removeAll { $0.key == key }
@@ -328,7 +358,7 @@ public final class FleetStore: ObservableObject {
         }
     }
 
-    private func dedupe(nodeID: String, keep key: String) {
+    func dedupe(nodeID: String, keep key: String) {
         // The same node can surface twice (Bonjour + manual, or an old
         // Bonjour name). The discovered face wins; the by-address entry is
         // its fallback and is displaced, never deleted from persistence.

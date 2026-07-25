@@ -47,6 +47,7 @@ struct NodesSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .scrollDisabled(true)
         .fixedSize(horizontal: false, vertical: true)
     }
 }
@@ -217,6 +218,7 @@ struct GeneralSettingsView: View {
                 agentSections
             }
             .formStyle(.grouped)
+            .scrollDisabled(true)
             .fixedSize(horizontal: false, vertical: true)
         }
         .sheet(isPresented: $model.showLog) { logSheet }
@@ -497,6 +499,7 @@ struct CLISettingsView: View {
                 }
             }
             .formStyle(.grouped)
+            .scrollDisabled(true)
             .fixedSize(horizontal: false, vertical: true)
             if let error = model.lastError {
                 Text(error).font(.caption).foregroundStyle(.red)
