@@ -434,18 +434,7 @@ def readonly():
     serve daemon did exactly that and dropped off the fleet while the CLI
     kept working (2026-07-26).
     """
-    try:
-        conn = db_readonly()
-    except sqlite3.OperationalError:
-        # A WAL store whose log needs replay cannot be opened read-only —
-        # only a writable open can recover it, and SQLite does that on
-        # open. A writer killed mid-write leaves exactly this state, and
-        # it took the node offline while the CLI kept working
-        # (2026-07-26). Recover, write nothing, then read.
-        recovery = sqlite3.connect(STORE / "store.db", timeout=5)
-        recovery.execute("PRAGMA quick_check").fetchone()
-        recovery.close()
-        conn = db_readonly()
+    conn = db_readonly()
     try:
         yield conn
     finally:
@@ -453,13 +442,24 @@ def readonly():
 
 
 def db_readonly() -> sqlite3.Connection:
-    """A read-only connection: WAL admits concurrent readers while the CLI
-    writes. The serve process handles every request through this — it can
-    never become a second writer."""
-    conn = sqlite3.connect(
-        f"file:{STORE / 'store.db'}?mode=ro", uri=True, timeout=5)
+    """A connection that cannot write: WAL admits concurrent readers while
+    the CLI writes. The serve process handles every request through this —
+    it can never become a second writer.
+
+    The guarantee comes from `query_only`, not from opening the file
+    read-only. A WAL database needs its -shm index, and only a writable
+    file handle may create it; `mode=ro` therefore fails outright with
+    "unable to open database file" whenever the store sits cleanly
+    checkpointed, which is exactly what an idle store looks like. That
+    took the node offline repeatedly (2026-07-26), and reopening a writer
+    to repair it did not help, since closing the last writer deletes the
+    -shm again. `query_only` refuses every write on this connection while
+    letting SQLite build the index it needs to read at all.
+    """
+    conn = sqlite3.connect(STORE / "store.db", timeout=5)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA query_only=1")
     return conn
 
 
@@ -1896,9 +1896,13 @@ class NodeAPI(BaseHTTPRequestHandler):
                     "SELECT * FROM reviews WHERE status='open'"
                     " ORDER BY raised_at").fetchall()
                 dead = dead_session_refs(conn)
-            except sqlite3.OperationalError:
-                # A store from before the reviews table; the next CLI
-                # write creates it.
+            except sqlite3.OperationalError as error:
+                # A store from before the reviews table has none yet; the
+                # next CLI write creates it. Anything else is a failure to
+                # read, and answering "none" would report a quiet fleet
+                # rather than a broken one.
+                if "no such table" not in str(error):
+                    raise
                 return self._json({"reviews": []})
         # Reaping is the writer's job; serving is not going to repeat a
         # dead session's request while it waits for the next tick.
@@ -1911,7 +1915,9 @@ class NodeAPI(BaseHTTPRequestHandler):
                 rows = conn.execute(
                     "SELECT * FROM sessions WHERE ended_at IS NULL"
                     " ORDER BY started_at").fetchall()
-            except sqlite3.OperationalError:
+            except sqlite3.OperationalError as error:
+                if "no such table" not in str(error):
+                    raise
                 return self._json({"sessions": []})
             gone = dead_pids(row["pid"] for row in rows)
         self._json({"sessions": [session_payload(row) for row in rows

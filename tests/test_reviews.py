@@ -115,8 +115,7 @@ def test_sessions_and_reviews_are_independent(cli, store):
 
 
 def test_serve_reads_a_store_whose_wal_needs_recovery(cli, store, tmp_path):
-    """A writer killed mid-write leaves a WAL that only a writable open
-    can replay; a read-only open fails until then. Serve must recover
+    """A writer killed mid-write leaves a WAL behind. Serve must read it
     rather than drop the node off the fleet."""
     import signal
     import sqlite3
@@ -259,3 +258,43 @@ def test_a_killed_session_whose_parent_lingers_counts_as_dead(cli, store):
         os.waitpid(child, 0)
     except ChildProcessError:
         pass
+
+
+def test_serve_reads_an_idle_store_with_no_wal_sidecars(cli, store):
+    """The state an idle store settles into: cleanly checkpointed, no
+    -wal and no -shm. A `mode=ro` connection cannot create the index a
+    WAL database needs, so it fails outright — which took the node
+    offline every time the fleet went quiet."""
+    cli("session", "start", "--session", "s-idle", "--cwd", "/w/p",
+        "--pid", str(os.getpid()))
+    for suffix in ("-wal", "-shm"):
+        sidecar = store / f"store.db{suffix}"
+        assert not sidecar.exists(), f"{sidecar.name} should be gone"
+
+    listing = json.loads(cli("session", "list").stdout)["sessions"]
+    assert [s["session_ref"] for s in listing] == ["s-idle"]
+
+
+def test_the_read_connection_refuses_to_write(cli, store):
+    """The single-writer rule is enforced by the connection, not by the
+    file mode: query_only rejects writes while still letting SQLite build
+    the -shm index it needs to read."""
+    cli("session", "start", "--session", "s-guard", "--cwd", "/w/p")
+    probe = subprocess.run(
+        [sys.executable, "-c", (
+            "import runpy, sqlite3, sys\n"
+            "mod = {}\n"
+            f"src = open({str(BIN)!r}).read().split('def main(')[0]\n"
+            "exec(compile(src, 'continuation', 'exec'), mod)\n"
+            "conn = mod['db_readonly']()\n"
+            "print(conn.execute('select count(*) from sessions').fetchone()[0])\n"
+            "try:\n"
+            "    conn.execute(\"insert into sessions (session_ref, agent,"
+            " started_at, updated_at) values ('x','a','1','1')\")\n"
+            "    print('WROTE')\n"
+            "except sqlite3.OperationalError as error:\n"
+            "    print('REFUSED', error)\n")],
+        capture_output=True, text=True,
+        env={**os.environ, "AGENTIC_CONTINUATION_STORE": str(store)})
+    assert "REFUSED" in probe.stdout, probe.stdout + probe.stderr
+    assert probe.stdout.splitlines()[0] == "1"
