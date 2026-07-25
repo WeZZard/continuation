@@ -206,7 +206,13 @@ with the user first).
 - Live-proven on this Mac: hook blocked against the LIVE store, the
   review appeared in the app sidebar via SSE, `review answer` delivered
   the decision into the waiting hook verbatim, everything cleared.
-  Live serve restarted (0.4.0). Plugin console@continuation installed.
+  Live serve restarted (0.4.0). RULING (user, same day): the console
+  plugin is NEVER installed at user scope — supervision is opt-in per
+  instance via `claude --plugin-dir <repo>/plugins/console`, mirroring
+  the dispatcher's injected plugin; delisted from the marketplace, the
+  user-scope install reverted, and the --plugin-dir path live-verified
+  (a -p session's Stop/SessionEnd hooks raised and cleared review id 3
+  in the live store).
 - Bugs the live run caught (both fixed + regression-tested): the hook
   crashed on system Python 3.9 (`str | None` without the annotations
   future-import — hook tests now run /usr/bin/python3 exactly as

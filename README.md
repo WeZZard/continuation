@@ -191,10 +191,19 @@ local packages in place, so it tracks the repo live.
 
 ## Review console — the `console` plugin
 
-Interactive sessions surface the moments they wait on the human. The
-`console` plugin's hooks raise a review item when a session asks a
-question (AskUserQuestion), presents a plan (ExitPlanMode), or stops,
-and clear it when the session moves on by itself. Questions and plans
+A session is supervised by explicit choice at launch — the plugin is
+never installed at user scope, and it is deliberately absent from the
+marketplace (the same rule as the dispatcher's spawned-session plugin):
+
+```bash
+claude --plugin-dir <repo>/plugins/console
+```
+
+Eventually Continuation spawns and manages agent instances itself and
+injects this plugin the same way. Its hooks raise a review item when
+the session asks a question (AskUserQuestion), presents a plan
+(ExitPlanMode), or stops, and clear it when the session moves on by
+itself. Questions and plans
 hold the tool call (`CONTINUATION_REVIEW_WAIT` seconds, default 300)
 while the review box — the app's Review section — delivers the decision
 back into the session as the hook's permission decision; a timeout falls
