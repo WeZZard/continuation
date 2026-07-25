@@ -5,6 +5,13 @@ struct SidebarView: View {
     @EnvironmentObject private var store: FleetStore
     @Binding var selection: SidebarSelection?
     @Binding var showAddNode: Bool
+    @State private var openReview: ReviewSheetTarget?
+
+    struct ReviewSheetTarget: Identifiable {
+        let nodeKey: String
+        let item: ReviewItem
+        var id: String { "\(nodeKey)#\(item.id)" }
+    }
 
     var body: some View {
         List(selection: $selection) {
@@ -21,6 +28,32 @@ struct SidebarView: View {
                 }
                 Label("Activity", systemImage: "waveform.path.ecg")
                     .tag(SidebarSelection.activity)
+            }
+            // Sessions waiting on the human, present only while any are.
+            if !store.reviewRows.isEmpty {
+                Section("Review") {
+                    ForEach(store.reviewRows, id: \.item.id) { row in
+                        Button {
+                            openReview = ReviewSheetTarget(
+                                nodeKey: row.nodeKey, item: row.item)
+                        } label: {
+                            Label {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(row.item.summary.isEmpty
+                                         ? row.item.kind : row.item.summary)
+                                        .lineLimit(1)
+                                    Text("\(row.item.agent) · \(row.nodeName)")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            } icon: {
+                                Image(systemName:
+                                    ReviewKindIcon.name(row.item.kind))
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
             }
             Section("Nodes") {
                 ForEach(store.nodes.filter { !$0.excluded }) { node in
@@ -59,6 +92,9 @@ struct SidebarView: View {
         }
         .listStyle(.sidebar)
         .navigationSplitViewColumnWidth(min: 180, ideal: 210)
+        .sheet(item: $openReview) { target in
+            ReviewConsoleView(nodeKey: target.nodeKey, item: target.item)
+        }
         .overlay(alignment: .bottom) {
             if store.nodes.isEmpty {
                 VStack(spacing: 6) {

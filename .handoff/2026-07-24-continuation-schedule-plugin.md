@@ -191,6 +191,36 @@ with the user first).
   UserDefaults identity reset with the bundle-id change (trivial;
   manual-nodes.json is folder-keyed and survived — nodes intact).
 
+## Addendum: the review console (2026-07-25)
+
+- BUILT end to end, user-approved design: reviews table + `review`
+  verbs (raise/wait/answer/clear/list) in the CLI (v0.4.0), /v1/reviews
+  on serve, the `console` plugin (hooks: PreToolUse on
+  AskUserQuestion/ExitPlanMode raises and BLOCKS awaiting a console
+  decision — deny-with-answers / allow-plan — PostToolUse/
+  UserPromptSubmit/SessionEnd clear, Stop raises `stopped`;
+  AGENTIC_TASK_ID guards dispatcher spawns), and the app's Review
+  sidebar section with an actionable console sheet (question options,
+  plan approve/feedback; actions shell the local CLI; remote nodes
+  read-only).
+- Live-proven on this Mac: hook blocked against the LIVE store, the
+  review appeared in the app sidebar via SSE, `review answer` delivered
+  the decision into the waiting hook verbatim, everything cleared.
+  Live serve restarted (0.4.0). Plugin console@continuation installed.
+- Bugs the live run caught (both fixed + regression-tested): the hook
+  crashed on system Python 3.9 (`str | None` without the annotations
+  future-import — hook tests now run /usr/bin/python3 exactly as
+  hooks.json does), and headless `claude -p` exposes NEITHER
+  AskUserQuestion nor ExitPlanMode, so the in-Claude leg is verified by
+  contract-level hook tests; the first real interactive plan/question
+  the user hits verifies it humanly.
+- Known gaps: console sheet's click path not machine-verified (AX
+  bridge would not reach the window; the sheet's action runs the same
+  CLI call that was live-verified); pi capture is phase two (needs a TS
+  extension); remote-node actions await a write channel (serve stays
+  read-only by ruling); blocking default 300s via
+  CONTINUATION_REVIEW_WAIT.
+
 ## Not done / open
 
 - **Not published to the wezzard-skills marketplace** — that catalog pins

@@ -1,0 +1,6 @@
+{
+  "name": "console",
+  "version": "0.1.0",
+  "license": "AGPL-3.0-or-later",
+  "description": "The channel between agent sessions and the Continuation review box: hooks raise a review item when a session needs the human (a question, a plan, a stop), hold the session while the console decides, deliver the decision back in, and clear items the session resolves on its own."
+}

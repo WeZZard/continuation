@@ -26,6 +26,8 @@ public struct NodeState: Identifiable, Hashable {
     /// row stays visible in Settings — the reversible form of removal
     /// for discovered nodes, which re-appear if merely removed.
     public var excluded: Bool = false
+    /// Open review items — sessions on this node waiting on the human.
+    public var reviews: [ReviewItem] = []
 
     public var id: String { key }
     public var pendingCount: Int {
@@ -131,6 +133,7 @@ public final class FleetStore: ObservableObject {
     private static let refreshingCommands: Set<String> = [
         "register", "unregister", "continue", "migrate", "tick",
         "tick.start-run", "tick.evaluate", "tick.run-settled",
+        "review.raise", "review.answer", "review.clear",
     ]
 
     public init(persistence: Persistence = Persistence()) {
@@ -243,6 +246,18 @@ public final class FleetStore: ObservableObject {
 
     public var dueCount: Int { dueEntries.count }
 
+    /// Every open review item across the fleet, local nodes first.
+    public var reviewRows: [(nodeKey: String, nodeName: String,
+                             isLocal: Bool, item: ReviewItem)] {
+        nodes.filter { !$0.excluded }
+            .sorted { $0.isLocal != $1.isLocal ? $0.isLocal : ($0.displayName < $1.displayName) }
+            .flatMap { node in
+                node.reviews.map {
+                    (node.key, node.displayName, node.isLocal, $0)
+                }
+            }
+    }
+
     /// What the menu bar counts down to: the soonest scheduled activation,
     /// or nil when something is already due (the countdown shows "due now").
     public var nextScheduled: FleetEntry? { scheduledEntries.first }
@@ -338,11 +353,14 @@ public final class FleetStore: ObservableObject {
         do {
             let info = try await client.node()
             let queue = try await client.queue()
+            // Older serves lack /v1/reviews; that never fails the poll.
+            let reviews = (try? await client.reviews()) ?? []
             update(key: key) { node in
                 node.online = true
                 node.lastSeen = Date()
                 node.info = info
                 node.queue = queue
+                node.reviews = reviews
                 node.displayName = info.displayName ?? info.hostname
             }
             sortNodes()
@@ -365,8 +383,10 @@ public final class FleetStore: ObservableObject {
                 if Self.refreshingCommands.contains(event.cmd) {
                     let queue = try await client.queue()
                     let info = try? await client.node()
+                    let reviews = (try? await client.reviews()) ?? []
                     update(key: key) { node in
                         node.queue = queue
+                        node.reviews = reviews
                         if let info { node.info = info }
                     }
                     saveSnapshot(key: key)

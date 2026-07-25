@@ -9,6 +9,11 @@
       "name": "continuation",
       "description": "Schedule continuations with the continuation scheduler: the continuation:schedule skill fetches the grammar from the CLI (`authoring`) and registers approved cores through the CLI — the single writer.",
       "source": "./plugins/continuation"
+    },
+    {
+      "name": "console",
+      "description": "The agent↔Continuation review channel: hooks raise review items for questions, plans, and stops, hold the session for a console decision, and clear what the session resolves itself.",
+      "source": "./plugins/console"
     }
   ]
 }

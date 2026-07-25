@@ -189,6 +189,20 @@ skill, bump `plugins/continuation/.claude-plugin/plugin.json` and run
 `claude plugin update continuation@continuation`. pi references
 local packages in place, so it tracks the repo live.
 
+## Review console — the `console` plugin
+
+Interactive sessions surface the moments they wait on the human. The
+`console` plugin's hooks raise a review item when a session asks a
+question (AskUserQuestion), presents a plan (ExitPlanMode), or stops,
+and clear it when the session moves on by itself. Questions and plans
+hold the tool call (`CONTINUATION_REVIEW_WAIT` seconds, default 300)
+while the review box — the app's Review section — delivers the decision
+back into the session as the hook's permission decision; a timeout falls
+back to the terminal. Reviews live in the `reviews` table (`review
+raise|wait|answer|clear|list`), serve at `/v1/reviews`, and stream over
+the events SSE. Actions are local-node only in v1. Dispatcher-spawned
+sessions never reach the box (`AGENTIC_TASK_ID` guard).
+
 ## License
 
 GNU Affero General Public License v3.0 or later — see `LICENSE`. The

@@ -69,7 +69,7 @@ END_KEYS = {"schema_version", "step"}
 KEBAB = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 LABEL = "com.wezzard.agent.agentic-continuation"
 SERVE_LABEL = LABEL + ".serve"
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 PROTO = "v1"
 DEFAULT_SERVE_PORT = 7787
 MDNS_SERVICE = "_agentic-cont._tcp"  # DNS-SD service names are capped at 15 bytes
@@ -336,6 +336,21 @@ CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS reviews (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_ref TEXT NOT NULL,
+  agent TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('question','plan','stopped')),
+  cwd TEXT NOT NULL DEFAULT '',
+  summary TEXT NOT NULL DEFAULT '',
+  payload TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'open'
+    CHECK (status IN ('open','answered','cleared')),
+  decision TEXT,
+  raised_at TEXT NOT NULL,
+  resolved_at TEXT
+);
+CREATE INDEX IF NOT EXISTS reviews_open ON reviews (status, session_ref);
 """
 
 
@@ -958,6 +973,111 @@ def cmd_show(args) -> int:
     return 0
 
 
+def cmd_review(args) -> int:
+    """The console channel between interactive agents and the review box.
+
+    Hooks RAISE an item when a session needs the human (a question, a
+    plan, a stop), then WAIT for a console decision; the app ANSWERS or
+    the session's own progress CLEARS. The CLI stays the single writer.
+    """
+    conn = db()
+    if args.action == "raise":
+        if not args.session or not args.kind:
+            raise SystemExit("review raise requires --session and --kind")
+        raw = "{}"
+        if args.payload:
+            raw = sys.stdin.read() if args.payload == "-" \
+                else Path(args.payload).read_text()
+        json.loads(raw)
+        with tx(conn):
+            cursor = conn.execute(
+                "INSERT INTO reviews (session_ref, agent, kind, cwd, summary,"
+                " payload, raised_at) VALUES (?,?,?,?,?,?,?)",
+                (args.session, args.agent, args.kind, args.cwd, args.summary,
+                 raw, now_utc().isoformat()))
+            review_id = cursor.lastrowid
+            event(conn, "review.raise", args.actor, review_id=review_id,
+                  kind=args.kind, session_ref=args.session)
+        print(review_id)
+        return 0
+    if args.action == "answer":
+        if not args.id or not args.decision:
+            raise SystemExit("review answer requires an id and --decision")
+        decision = sys.stdin.read() if args.decision == "-" \
+            else Path(args.decision).read_text()
+        json.loads(decision)
+        with tx(conn):
+            row = conn.execute("SELECT status FROM reviews WHERE id=?",
+                               (args.id,)).fetchone()
+            if row is None:
+                raise SystemExit(f"unknown review {args.id}")
+            if row["status"] != "open":
+                raise SystemExit(f"review {args.id} is already {row['status']}")
+            conn.execute(
+                "UPDATE reviews SET status='answered', decision=?,"
+                " resolved_at=? WHERE id=?",
+                (decision, now_utc().isoformat(), args.id))
+            event(conn, "review.answer", args.actor, review_id=int(args.id))
+        return 0
+    if args.action == "clear":
+        if not args.session:
+            raise SystemExit("review clear requires --session")
+        with tx(conn):
+            where = "status='open' AND session_ref=?"
+            params: list = [args.session]
+            if args.kind:
+                where += " AND kind=?"
+                params.append(args.kind)
+            rows = conn.execute(
+                f"SELECT id FROM reviews WHERE {where}", params).fetchall()
+            if rows:
+                conn.execute(
+                    f"UPDATE reviews SET status='cleared', resolved_at=?"
+                    f" WHERE {where}", [now_utc().isoformat(), *params])
+                event(conn, "review.clear", args.actor,
+                      session_ref=args.session,
+                      review_ids=[row["id"] for row in rows])
+        return 0
+    if args.action == "wait":
+        if not args.id:
+            raise SystemExit("review wait requires an id")
+        deadline = time.time() + args.timeout
+        while True:
+            row = conn.execute(
+                "SELECT status, decision FROM reviews WHERE id=?",
+                (args.id,)).fetchone()
+            if row is None:
+                raise SystemExit(f"unknown review {args.id}")
+            if row["status"] == "answered":
+                print(row["decision"])
+                return 0
+            if row["status"] == "cleared":
+                return 4
+            if time.time() >= deadline:
+                return 3
+            time.sleep(0.5)
+    # list
+    rows = conn.execute(
+        "SELECT * FROM reviews WHERE status='open' ORDER BY raised_at"
+    ).fetchall()
+    print(json.dumps({"reviews": [review_payload(row) for row in rows]},
+                     ensure_ascii=False))
+    return 0
+
+
+def review_payload(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "session_ref": row["session_ref"],
+        "agent": row["agent"],
+        "kind": row["kind"],
+        "cwd": row["cwd"],
+        "summary": row["summary"],
+        "payload": json.loads(row["payload"]),
+        "raised_at": row["raised_at"],
+    }
+
+
 def cmd_authoring(args) -> int:
     """Print the current edition's core-authoring guide (the program
     constants — the grammar's single home; plugins must never carry a
@@ -1560,6 +1680,8 @@ class NodeAPI(BaseHTTPRequestHandler):
         if head == "queue" and not rest:
             conn = db_readonly()
             return self._json(collect_queue(conn, now_local()))
+        if head == "reviews" and not rest:
+            return self._reviews()
         if head == "log" and not rest:
             return self._log(query)
         if head == "events" and not rest:
@@ -1567,6 +1689,20 @@ class NodeAPI(BaseHTTPRequestHandler):
         if head == "tasks":
             return self._tasks(rest, query)
         return self._json({"error": "unknown endpoint"}, 404)
+
+    def _reviews(self) -> None:
+        conn = db_readonly()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM reviews WHERE status='open' ORDER BY raised_at"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # A store from before the reviews table; the next CLI write
+            # creates it.
+            return self._json({"reviews": []})
+        finally:
+            conn.close()
+        self._json({"reviews": [review_payload(row) for row in rows]})
 
     def _node(self) -> None:
         conn = db_readonly()
@@ -1782,6 +1918,23 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("authoring",
                        help="Print the current edition's core-authoring guide.")
     p.set_defaults(fn=cmd_authoring)
+
+    p = sub.add_parser("review",
+                       help="Console channel: raise/wait/answer/clear/list"
+                            " review items from interactive agents.")
+    p.add_argument("action", choices=("raise", "wait", "answer", "clear", "list"))
+    p.add_argument("id", nargs="?")
+    p.add_argument("--session", default="")
+    p.add_argument("--agent", default="claude-code")
+    p.add_argument("--kind", choices=("question", "plan", "stopped"))
+    p.add_argument("--cwd", default="")
+    p.add_argument("--summary", default="")
+    p.add_argument("--payload", default=None,
+                   help="JSON file, or - for stdin.")
+    p.add_argument("--decision", default=None,
+                   help="JSON file, or - for stdin.")
+    p.add_argument("--timeout", type=float, default=300)
+    p.set_defaults(fn=cmd_review)
 
     p = sub.add_parser("register", help="Register a task with its continuation.")
     p.add_argument("task_id")

@@ -1,0 +1,57 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "AskUserQuestion|ExitPlanMode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 ${CLAUDE_PLUGIN_ROOT}/hooks/review.py",
+            "timeout": 320
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "AskUserQuestion|ExitPlanMode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 ${CLAUDE_PLUGIN_ROOT}/hooks/review.py"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 ${CLAUDE_PLUGIN_ROOT}/hooks/review.py"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 ${CLAUDE_PLUGIN_ROOT}/hooks/review.py"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 ${CLAUDE_PLUGIN_ROOT}/hooks/review.py"
+          }
+        ]
+      }
+    ]
+  }
+}

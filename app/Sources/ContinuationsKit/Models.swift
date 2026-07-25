@@ -325,3 +325,59 @@ public enum StoreDate {
         }
     }()
 }
+
+// MARK: - Reviews
+
+/// A moment where an interactive agent session waits on the human — a
+/// question, a plan, or a stop — raised by the console plugin's hooks.
+public struct ReviewItem: Codable, Hashable, Identifiable, Sendable {
+    public let id: Int
+    public let sessionRef: String
+    public let agent: String
+    public let kind: String            // question | plan | stopped
+    public let cwd: String
+    public let summary: String
+    public let payload: ReviewPayload
+    public let raisedAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case sessionRef = "session_ref"
+        case agent
+        case kind
+        case cwd
+        case summary
+        case payload
+        case raisedAt = "raised_at"
+    }
+}
+
+public struct ReviewPayload: Codable, Hashable, Sendable {
+    public let questions: [ReviewQuestion]?
+    public let plan: String?
+
+    public init(from decoder: Decoder) throws {
+        let container = try? decoder.container(keyedBy: CodingKeys.self)
+        questions = try? container?.decodeIfPresent(
+            [ReviewQuestion].self, forKey: .questions)
+        plan = try? container?.decodeIfPresent(String.self, forKey: .plan)
+    }
+
+    enum CodingKeys: String, CodingKey { case questions, plan }
+}
+
+public struct ReviewQuestion: Codable, Hashable, Sendable {
+    public let question: String
+    public let header: String?
+    public let multiSelect: Bool?
+    public let options: [ReviewOption]?
+}
+
+public struct ReviewOption: Codable, Hashable, Sendable {
+    public let label: String
+    public let description: String?
+}
+
+struct ReviewPage: Decodable {
+    let reviews: [ReviewItem]
+}
