@@ -365,15 +365,21 @@ struct AgentsSettingsView: View {
                 }
                 Spacer()
                 // The enable flag is agent-native configuration; it works
-                // for dev wiring too — it never moves the wiring.
+                // for dev wiring too — it never moves the wiring. Install
+                // and uninstall are buttons below; this switch only mutes.
                 if let enabled = status?.enabled {
-                    Toggle("Enabled", isOn: Binding(
+                    Toggle(isOn: Binding(
                         get: { enabled },
-                        set: { setEnabled($0) }))
-                        .toggleStyle(.switch)
-                        .controlSize(.small)
-                        .labelsHidden()
-                        .disabled(!model.actionsAllowed || model.busy)
+                        set: { setEnabled($0) })) {
+                        Text("Active")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .help("Whether new sessions load the plugin. "
+                          + "Installing and removing are buttons, not this switch.")
+                    .disabled(!model.actionsAllowed || model.busy)
                 }
             }
             switch status?.wiring {
