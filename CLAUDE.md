@@ -20,11 +20,10 @@ it carries the current state, pending work, and the settled design rulings.
 - Discuss design with the user before implementing; build only after an
   explicit go. Present design options in prose, not option-forms.
 - Debugging the app means the DEBUG build, through
-  `app/scripts/run-debug.sh` (rebuilds `dist/Continuation-Debug.app`,
-  replaces the running debug instance, logs to
-  `/tmp/continuation-debug.log`). Never debug against
-  `/Applications/Continuations.app` — that is the shipped release
-  carrying real prefs and state, and its code is stale by definition.
+  `app/scripts/run-debug.sh` (rebuilds the debug bundle, deploys it to
+  `/Applications/Continuation-Debug.app` — the debug app's home since
+  2026-07-25, the user walks through the same copy — replaces the
+  running instance, logs to `/tmp/continuation-debug.log`).
 - Installing/loading launchd jobs on this Mac is fine when the user asks
   (an earlier session wrongly recorded a blanket prohibition — the user
   disavowed it 2026-07-24). The minis' `--daemon` installs require the

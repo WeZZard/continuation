@@ -219,15 +219,6 @@ struct GeneralSettingsView: View {
             .formStyle(.grouped)
             .fixedSize(horizontal: false, vertical: true)
         }
-        .overlay(alignment: .bottomTrailing) {
-            Button {
-                model.refresh()
-            } label: {
-                Label("Refresh", systemImage: "arrow.clockwise")
-            }
-            .padding(10)
-            .disabled(model.busy)
-        }
         .sheet(isPresented: $model.showLog) { logSheet }
         .confirmationDialog(
             "Uninstall the plugin from \(confirmUninstall == .pi ? "pi" : "Claude Code")?",
@@ -294,7 +285,7 @@ struct GeneralSettingsView: View {
     // ------------------------------------------------------- agent rows
 
     @ViewBuilder private var agentSections: some View {
-        Section("Agent Plugins") {
+        Section {
             agentRow(logo: .claude, title: "Claude Code",
                      status: model.snapshot?.claude, install: model.installClaude)
             agentRow(logo: .pi, title: "pi",
@@ -307,6 +298,20 @@ struct GeneralSettingsView: View {
                     Button("Show Log") { model.showLog = true }
                         .controlSize(.small)
                 }
+            }
+        } header: {
+            HStack {
+                Text("Agent Plugins")
+                Spacer()
+                Button {
+                    model.refresh()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Refresh")
+                .disabled(model.busy)
             }
         }
     }
