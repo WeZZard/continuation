@@ -66,7 +66,7 @@ final class ProseBox: NSView {
     var onEdit: ((String) -> Void)?
     var onAttach: (([URL]) -> Void)?
     var onDragHover: ((Bool) -> Void)?
-    private var dragging = false { didSet { needsDisplay = true } }
+    private var dragging = false
 
     private let minHeight: CGFloat
     private let maxHeight: CGFloat
@@ -215,8 +215,10 @@ final class ProseBox: NSView {
             ? NSColor.textBackgroundColor
             : NSColor.quaternaryLabelColor.withAlphaComponent(0.12)).setFill()
         path.fill()
-        (dragging ? NSColor.controlAccentColor : NSColor.separatorColor).setStroke()
-        path.lineWidth = dragging ? 2 : 1
+        // One highlight for one drop: the dock draws it around the whole
+        // area that accepts the image, and a second border inside that
+        // would describe a second target that does not exist.
+        NSColor.separatorColor.setStroke()
         path.stroke()
     }
 }
@@ -230,7 +232,17 @@ extension ProseBox {
               carriesAnImage(sender.draggingPasteboard) else { return [] }
         dragging = true
         onDragHover?(true)
-        return .copy
+        return operation(for: sender)
+    }
+
+    /// An operation the source is offering. Returning one it never
+    /// offered reads as "no", however willing the destination is.
+    private func operation(for sender: NSDraggingInfo) -> NSDragOperation {
+        let offered = sender.draggingSourceOperationMask
+        if offered.contains(.copy) { return .copy }
+        if offered.contains(.generic) { return .generic }
+        if offered.contains(.link) { return .link }
+        return offered.isEmpty ? .copy : offered
     }
 
     /// Answering once is not enough. A destination is asked again for
@@ -238,7 +250,7 @@ extension ProseBox {
     /// changed its mind — which is why the box lit up on entry and then
     /// refused the release (2026-07-26).
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        dragging ? .copy : []
+        dragging ? operation(for: sender) : []
     }
 
     override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
@@ -258,7 +270,7 @@ extension ProseBox {
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         dragging = false
         onDragHover?(false)
-        let kept = images(on: sender.draggingPasteboard)
+        let kept = images(from: sender)
         NSLog("[composer] drop delivered %d image(s)", kept.count)
         guard !kept.isEmpty else { return false }
         onAttach?(kept)
@@ -275,16 +287,37 @@ extension ProseBox {
         return pasteboard.types?.contains { $0 == .png || $0 == .tiff } ?? false
     }
 
-    /// Every image on the pasteboard, copied somewhere it will outlive
-    /// the drag. Finder offers file URLs; a browser offers only pixels.
-    private func images(on pasteboard: NSPasteboard) -> [URL] {
+    /// Every image a drag carries, copied somewhere it will outlive the
+    /// drag. Finder sends file URLs, sometimes only as a legacy filename
+    /// list; a browser sends pixels and no path at all. Each shape is
+    /// tried in turn and the first that yields anything wins.
+    private func images(from sender: NSDraggingInfo) -> [URL] {
         let directory = ReviewComposer.attachmentsDirectory()
-        let urls = pasteboard.readObjects(
-            forClasses: [NSURL.self],
-            options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        let pasteboard = sender.draggingPasteboard
+
+        var urls: [URL] = []
+        sender.enumerateDraggingItems(options: [], for: nil,
+                                      classes: [NSURL.self],
+                                      searchOptions: [
+                                        .urlReadingFileURLsOnly: true,
+                                      ]) { item, _, _ in
+            if let url = item.item as? URL { urls.append(url) }
+        }
+        if urls.isEmpty {
+            urls = pasteboard.readObjects(
+                forClasses: [NSURL.self],
+                options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        }
+        if urls.isEmpty,
+           let names = pasteboard.propertyList(
+            forType: NSPasteboard.PasteboardType("NSFilenamesPboardType"))
+            as? [String] {
+            urls = names.map { URL(fileURLWithPath: $0) }
+        }
         let files = urls.filter(ReviewComposer.isImage)
             .compactMap { try? ReviewComposer.keep($0, in: directory) }
         if !files.isEmpty { return files }
+
         for type in [NSPasteboard.PasteboardType.png, .tiff] {
             guard let data = pasteboard.data(forType: type) else { continue }
             let suffix = type == .png ? "png" : "tiff"
