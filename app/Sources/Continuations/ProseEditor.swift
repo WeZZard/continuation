@@ -54,6 +54,7 @@ final class ProseBox: NSView {
     /// A height the human dragged to. While it is set the box keeps it,
     /// however much is written; double-clicking the grip gives it back.
     private var chosen: CGFloat?
+    private var dragStart: CGFloat?
 
     init(minHeight: CGFloat, maxHeight: CGFloat, storageKey: String?) {
         self.minHeight = minHeight
@@ -88,7 +89,8 @@ final class ProseBox: NSView {
         textView.autoresizingMask = [.width]
 
         grip.isHidden = storageKey == nil
-        grip.onDrag = { [weak self] delta in self?.drag(by: delta) }
+        grip.onBegin = { [weak self] in self?.beginDrag() }
+        grip.onDrag = { [weak self] risen in self?.drag(risen: risen) }
         grip.onSettle = { [weak self] in self?.remember() }
         grip.onReset = { [weak self] in self?.giveTheHeightBack() }
 
@@ -134,16 +136,26 @@ final class ProseBox: NSView {
 
     // ------------------------------------------------------------ sizing
 
+    private func beginDrag() {
+        dragStart = boxHeight.constant
+    }
+
     /// Dragging moves the constraint and nothing else — no state to
     /// publish, no storage to write — so the box tracks the cursor.
-    private func drag(by delta: CGFloat) {
-        let height = max(minHeight, boxHeight.constant - delta)
+    ///
+    /// `risen` is how far the cursor has climbed since the press, in
+    /// window coordinates, where up is positive. Up therefore makes the
+    /// box taller, which is the direction the hand expects and the
+    /// opposite of what event deltas gave.
+    private func drag(risen: CGFloat) {
+        let height = max(minHeight, (dragStart ?? boxHeight.constant) + risen)
         chosen = height
         boxHeight.constant = height
         invalidateIntrinsicContentSize()
     }
 
     private func remember() {
+        dragStart = nil
         guard let storageKey, let chosen else { return }
         UserDefaults.standard.set(Double(chosen), forKey: storageKey)
     }
@@ -228,12 +240,13 @@ private final class PlaceholderTextView: NSTextView {
 /// The handle. It reports drags in points and never touches layout itself,
 /// so one view stays in charge of the box's size.
 private final class GripView: NSView {
+    var onBegin: (() -> Void)?
     var onDrag: ((CGFloat) -> Void)?
     var onSettle: (() -> Void)?
     var onReset: (() -> Void)?
     var isEnabled = true { didSet { needsDisplay = true } }
 
-    private var dragging = false
+    private var pressedAt: CGFloat?
 
     override func resetCursorRects() {
         guard isEnabled, !isHidden else { return }
@@ -251,25 +264,27 @@ private final class GripView: NSView {
     override func mouseDown(with event: NSEvent) {
         guard isEnabled else { return }
         if event.clickCount == 2 {
-            dragging = false
+            pressedAt = nil
             onReset?()
             return
         }
-        dragging = true
+        pressedAt = event.locationInWindow.y
+        onBegin?()
     }
 
-    /// Deltas come from the event itself rather than from converted
-    /// positions: while the box resizes under the cursor, a position
-    /// measured against this view describes a view that has already
-    /// moved, which is what made the first version shake.
+    /// The window is the frame of reference. Its coordinates put up in
+    /// the positive direction and, unlike this view, it does not move
+    /// while the box resizes underneath the cursor — measuring against a
+    /// moving view is what made the first version shake, and event deltas
+    /// are what made the second one grow the wrong way.
     override func mouseDragged(with event: NSEvent) {
-        guard isEnabled, dragging else { return }
-        onDrag?(-event.deltaY)
+        guard isEnabled, let pressed = pressedAt else { return }
+        onDrag?(event.locationInWindow.y - pressed)
     }
 
     override func mouseUp(with event: NSEvent) {
-        guard dragging else { return }
-        dragging = false
+        guard pressedAt != nil else { return }
+        pressedAt = nil
         onSettle?()
     }
 }
