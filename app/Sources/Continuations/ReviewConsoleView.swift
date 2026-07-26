@@ -29,6 +29,9 @@ struct ReviewConsoleView: View {
     @State private var sending = false
     @State private var dropping = false
     @State private var dropNote: String?
+    /// The height the human dragged the message box to, remembered
+    /// across sessions; 0 means they never did, so it sizes itself.
+    @AppStorage("composerHeight") private var composerHeight: Double = 0
 
     private var item: ReviewItem? { row.review }
 
@@ -190,7 +193,10 @@ struct ReviewConsoleView: View {
             }
             ProseEditor(prompt: "Message — drop images anywhere below",
                         text: $message, minHeight: 52, maxHeight: 240,
-                        enabled: row.canReceiveMessage)
+                        enabled: row.canReceiveMessage,
+                        preferred: Binding(
+                            get: { composerHeight > 0 ? composerHeight : nil },
+                            set: { composerHeight = $0 ?? 0 }))
             if !row.canReceiveMessage {
                 unreachableNotice
             }

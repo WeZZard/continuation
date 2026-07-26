@@ -13,8 +13,12 @@ struct ProseEditor: View {
     var minHeight: CGFloat = 52
     var maxHeight: CGFloat = 220
     var enabled: Bool = true
+    /// A height the human chose, which outranks the automatic one until
+    /// they give it back. nil means the box sizes itself.
+    var preferred: Binding<CGFloat?>? = nil
 
     @State private var written: CGFloat = 0
+    @State private var dragStart: CGFloat?
 
     /// One inset for both layers. The text view carries no insets of its
     /// own, so the caret and the placeholder start at the same point by
@@ -22,10 +26,45 @@ struct ProseEditor: View {
     private let inset = EdgeInsets(top: 7, leading: 8, bottom: 7, trailing: 8)
 
     private var height: CGFloat {
-        min(max(written, minHeight), maxHeight)
+        if let chosen = preferred?.wrappedValue {
+            return max(chosen, minHeight)
+        }
+        return min(max(written, minHeight), maxHeight)
     }
 
     var body: some View {
+        VStack(spacing: 0) {
+            if preferred != nil { grip }
+            box
+        }
+    }
+
+    /// The handle: a box for writing in is a box the writer should be able
+    /// to size, and the automatic height is only a good guess.
+    private var grip: some View {
+        Capsule()
+            .fill(.tertiary)
+            .frame(width: 28, height: 4)
+            .padding(.vertical, 4)
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+            .onHover { inside in
+                if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { drag in
+                        let start = dragStart ?? height
+                        dragStart = start
+                        preferred?.wrappedValue = max(minHeight,
+                                                      start - drag.translation.height)
+                    }
+                    .onEnded { _ in dragStart = nil })
+            .onTapGesture(count: 2) { preferred?.wrappedValue = nil }
+            .help("Drag to resize · double-click to fit the message")
+    }
+
+    private var box: some View {
         ZStack(alignment: .topLeading) {
             ProseTextView(text: $text, editable: enabled, written: $written)
                 .frame(height: height)
