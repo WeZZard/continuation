@@ -1,5 +1,7 @@
 import AppKit
+import ContinuationsKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// A box for prose the human writes — a message to a session, feedback on
 /// a plan. It wraps, it grows with what is written, and it can be dragged
@@ -30,6 +32,10 @@ struct ProseEditor: NSViewRepresentable {
     /// The grip lives at the top of the whole input area — above any
     /// attachments — so it is drawn separately and reaches the box here.
     var handle: ProseBoxHandle?
+    /// Images dropped on the box, already copied somewhere they will
+    /// survive. nil means this box takes no attachments.
+    var onAttach: (([URL]) -> Void)?
+    var onDragHover: ((Bool) -> Void)?
 
     func makeNSView(context: Context) -> ProseBox {
         let box = ProseBox(minHeight: minHeight, maxHeight: maxHeight,
@@ -39,6 +45,11 @@ struct ProseEditor: NSViewRepresentable {
             // Publish on the next turn of the run loop: a view may not
             // change the state it is being built from.
             DispatchQueue.main.async { text = written }
+        }
+        box.onAttach = onAttach
+        box.onDragHover = onDragHover
+        if onAttach != nil {
+            box.registerForDraggedTypes([.fileURL, .png, .tiff])
         }
         return box
     }
@@ -53,6 +64,9 @@ struct ProseEditor: NSViewRepresentable {
 /// The text view, its placeholder, and the grip that sizes it.
 final class ProseBox: NSView {
     var onEdit: ((String) -> Void)?
+    var onAttach: (([URL]) -> Void)?
+    var onDragHover: ((Bool) -> Void)?
+    private var dragging = false { didSet { needsDisplay = true } }
 
     private let minHeight: CGFloat
     private let maxHeight: CGFloat
@@ -95,9 +109,11 @@ final class ProseBox: NSView {
         textView.isVerticallyResizable = true
         textView.autoresizingMask = [.width]
 
-        // A text view claims dropped files for itself, which left an
-        // image released on the box doing nothing while the area around
-        // it accepted the same drop. Let them fall through.
+        // A text view claims dropped files for itself and would insert
+        // a path as words. The box takes them instead — and it must take
+        // them itself: an AppKit view owns its rectangle, so a drop here
+        // never reaches a handler outside it, which left the box a dead
+        // zone inside a drop target (2026-07-26).
         textView.unregisterDraggedTypes()
         scroll.unregisterDraggedTypes()
 
@@ -199,8 +215,63 @@ final class ProseBox: NSView {
             ? NSColor.textBackgroundColor
             : NSColor.quaternaryLabelColor.withAlphaComponent(0.12)).setFill()
         path.fill()
-        NSColor.separatorColor.setStroke()
+        (dragging ? NSColor.controlAccentColor : NSColor.separatorColor).setStroke()
+        path.lineWidth = dragging ? 2 : 1
         path.stroke()
+    }
+}
+
+// MARK: - Taking a dropped image
+
+extension ProseBox {
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard onAttach != nil, textView.isEditable,
+              !images(on: sender.draggingPasteboard).isEmpty else { return [] }
+        dragging = true
+        onDragHover?(true)
+        return .copy
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        dragging = false
+        onDragHover?(false)
+    }
+
+    override func draggingEnded(_ sender: NSDraggingInfo) {
+        dragging = false
+        onDragHover?(false)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        dragging = false
+        onDragHover?(false)
+        let kept = images(on: sender.draggingPasteboard)
+        guard !kept.isEmpty else { return false }
+        onAttach?(kept)
+        return true
+    }
+
+    /// Every image on the pasteboard, copied somewhere it will outlive
+    /// the drag. Finder offers file URLs; a browser offers only pixels.
+    private func images(on pasteboard: NSPasteboard) -> [URL] {
+        let directory = ReviewComposer.attachmentsDirectory()
+        let urls = pasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        let files = urls.filter(ReviewComposer.isImage)
+            .compactMap { try? ReviewComposer.keep($0, in: directory) }
+        if !files.isEmpty { return files }
+        for type in [NSPasteboard.PasteboardType.png, .tiff] {
+            guard let data = pasteboard.data(forType: type) else { continue }
+            let suffix = type == .png ? "png" : "tiff"
+            if let kept = try? ReviewComposer.keep(data: data,
+                                                   extension: suffix,
+                                                   in: directory) {
+                return [kept]
+            }
+        }
+        return []
     }
 }
 

@@ -197,7 +197,14 @@ struct ReviewConsoleView: View {
             ProseEditor(prompt: "Message — drop images anywhere here",
                         text: $message, minHeight: 52, maxHeight: 240,
                         enabled: row.canReceiveMessage,
-                        storageKey: "composerHeight", handle: composerBox)
+                        storageKey: "composerHeight", handle: composerBox,
+                        onAttach: { kept in
+                            withAnimation(.snappy(duration: 0.18)) {
+                                attachments.append(contentsOf: kept)
+                                dropNote = nil
+                            }
+                        },
+                        onDragHover: { dropping = $0 })
             if !row.canReceiveMessage {
                 unreachableNotice
             }
