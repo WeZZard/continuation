@@ -469,6 +469,27 @@ public final class FleetStore: ObservableObject {
                 cursor = recent.first?.id ?? 0
                 ingest(recent.reversed(), key: key)
             }
+            // Some truths change without an event to announce them:
+            // whether a session's hook is still holding is read from that
+            // process, so it can stop being true while the store sits
+            // perfectly still. Interrupting a hook left the console
+            // offering Send for as long as nothing else happened
+            // (2026-07-26), so the waiting list is re-read on a timer as
+            // well as on events.
+            let refresher = Task { [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(5))
+                    guard let self else { return }
+                    let reviews = (try? await client.reviews()) ?? []
+                    let sessions = (try? await client.sessions()) ?? []
+                    self.update(key: key) { node in
+                        node.reviews = reviews
+                        node.sessions = sessions
+                    }
+                }
+            }
+            defer { refresher.cancel() }
+
             for try await event in client.events(after: cursor) {
                 update(key: key) { node in
                     node.lastEventID = event.id
