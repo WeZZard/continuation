@@ -2,163 +2,274 @@ import AppKit
 import SwiftUI
 
 /// A box for prose the human writes — a message to a session, feedback on
-/// a plan. What goes in it is paragraphs, so it is a text view: it wraps,
-/// it grows, and Return starts a line rather than submitting.
-struct ProseEditor: View {
+/// a plan. It wraps, it grows with what is written, and it can be dragged
+/// to whatever height the writer prefers.
+///
+/// AppKit, deliberately. The first version drove the height from SwiftUI
+/// state: a drag gesture wrote every delta into storage while the text
+/// view reported its measured height back in, so two writers fought over
+/// one layout each frame and the box jittered under the cursor. Here one
+/// view owns its height, moves a constraint directly while dragging, and
+/// tells SwiftUI only once the drag settles.
+struct ProseEditor: NSViewRepresentable {
     let prompt: String
     @Binding var text: String
-    /// Where the box rests when it is empty — a couple of lines, not a
-    /// pane. It grows with what is written and stops at `maxHeight`,
-    /// after which it scrolls.
     var minHeight: CGFloat = 52
-    var maxHeight: CGFloat = 220
+    var maxHeight: CGFloat = 240
     var enabled: Bool = true
-    /// A height the human chose, which outranks the automatic one until
-    /// they give it back. nil means the box sizes itself.
-    var preferred: Binding<CGFloat?>? = nil
+    /// Where a dragged height is remembered; nil for a box that always
+    /// sizes itself and shows no grip.
+    var storageKey: String?
 
-    @State private var written: CGFloat = 0
-    @State private var dragStart: CGFloat?
-
-    /// One inset for both layers. The text view carries no insets of its
-    /// own, so the caret and the placeholder start at the same point by
-    /// construction rather than by two constants agreeing.
-    private let inset = EdgeInsets(top: 7, leading: 8, bottom: 7, trailing: 8)
-
-    private var height: CGFloat {
-        if let chosen = preferred?.wrappedValue {
-            return max(chosen, minHeight)
+    func makeNSView(context: Context) -> ProseBox {
+        let box = ProseBox(minHeight: minHeight, maxHeight: maxHeight,
+                           storageKey: storageKey)
+        box.onEdit = { written in
+            // Publish on the next turn of the run loop: a view may not
+            // change the state it is being built from.
+            DispatchQueue.main.async { text = written }
         }
-        return min(max(written, minHeight), maxHeight)
+        return box
     }
 
-    var body: some View {
-        VStack(spacing: 0) {
-            if preferred != nil { grip }
-            box
-        }
-    }
-
-    /// The handle: a box for writing in is a box the writer should be able
-    /// to size, and the automatic height is only a good guess.
-    private var grip: some View {
-        Capsule()
-            .fill(.tertiary)
-            .frame(width: 28, height: 4)
-            .padding(.vertical, 4)
-            .frame(maxWidth: .infinity)
-            .contentShape(Rectangle())
-            .onHover { inside in
-                if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
-            }
-            .gesture(
-                DragGesture(minimumDistance: 1)
-                    .onChanged { drag in
-                        let start = dragStart ?? height
-                        dragStart = start
-                        preferred?.wrappedValue = max(minHeight,
-                                                      start - drag.translation.height)
-                    }
-                    .onEnded { _ in dragStart = nil })
-            .onTapGesture(count: 2) { preferred?.wrappedValue = nil }
-            .help("Drag to resize · double-click to fit the message")
-    }
-
-    private var box: some View {
-        ZStack(alignment: .topLeading) {
-            ProseTextView(text: $text, editable: enabled, written: $written)
-                .frame(height: height)
-            if text.isEmpty {
-                Text(prompt)
-                    .font(.body)
-                    .foregroundStyle(.tertiary)
-                    .allowsHitTesting(false)
-            }
-        }
-        .padding(inset)
-        .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(enabled ? AnyShapeStyle(.background)
-                              : AnyShapeStyle(.quaternary.opacity(0.4))))
-        .overlay(
-            RoundedRectangle(cornerRadius: 6)
-                .stroke(.separator))
+    func updateNSView(_ box: ProseBox, context: Context) {
+        box.apply(text: text, prompt: prompt, enabled: enabled)
     }
 }
 
-/// AppKit's text view with every inset removed, so its first glyph sits
-/// exactly where the layout puts its origin. SwiftUI's own TextEditor
-/// hides a line-fragment padding that no API can reach, which left the
-/// caret a few points left of the placeholder (spotted 2026-07-26).
-private struct ProseTextView: NSViewRepresentable {
-    @Binding var text: String
-    var editable: Bool
-    /// How tall the words currently are, so the box can be the size of
-    /// what is in it.
-    @Binding var written: CGFloat
+// MARK: - The box
 
-    func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSTextView.scrollableTextView()
+/// The text view, its placeholder, and the grip that sizes it.
+final class ProseBox: NSView {
+    var onEdit: ((String) -> Void)?
+
+    private let minHeight: CGFloat
+    private let maxHeight: CGFloat
+    private let storageKey: String?
+    private let scroll = NSScrollView()
+    private let textView = PlaceholderTextView()
+    private let grip = GripView()
+    private var boxHeight: NSLayoutConstraint!
+    private var gripHeight: CGFloat { storageKey == nil ? 0 : 12 }
+    /// A height the human dragged to. While it is set the box keeps it,
+    /// however much is written; double-clicking the grip gives it back.
+    private var chosen: CGFloat?
+
+    init(minHeight: CGFloat, maxHeight: CGFloat, storageKey: String?) {
+        self.minHeight = minHeight
+        self.maxHeight = maxHeight
+        self.storageKey = storageKey
+        super.init(frame: .zero)
+
+        translatesAutoresizingMaskIntoConstraints = false
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        grip.translatesAutoresizingMaskIntoConstraints = false
+
+        scroll.documentView = textView
         scroll.drawsBackground = false
-        // The clip view paints its own background and would hide the
-        // placeholder drawn behind the text.
         scroll.contentView.drawsBackground = false
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
-        guard let view = scroll.documentView as? NSTextView else { return scroll }
-        view.delegate = context.coordinator
-        view.font = .preferredFont(forTextStyle: .body)
-        view.textContainerInset = .zero
-        view.textContainer?.lineFragmentPadding = 0
-        view.drawsBackground = false
-        view.isRichText = false
-        view.allowsUndo = true
-        view.isAutomaticQuoteSubstitutionEnabled = false
-        view.isAutomaticDashSubstitutionEnabled = false
-        return scroll
-    }
+        scroll.borderType = .noBorder
+        scroll.automaticallyAdjustsContentInsets = false
+        scroll.contentInsets = NSEdgeInsets(top: 7, left: 8, bottom: 7, right: 8)
 
-    func updateNSView(_ scroll: NSScrollView, context: Context) {
-        guard let view = scroll.documentView as? NSTextView else { return }
-        if view.string != text { view.string = text }
-        view.isEditable = editable
-        view.isSelectable = editable
-        view.textColor = editable ? .labelColor : .disabledControlTextColor
-        context.coordinator.report(view)
-    }
+        textView.delegate = self
+        textView.font = .preferredFont(forTextStyle: .body)
+        textView.textContainerInset = .zero
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.textContainer?.widthTracksTextView = true
+        textView.drawsBackground = false
+        textView.isRichText = false
+        textView.allowsUndo = true
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isVerticallyResizable = true
+        textView.autoresizingMask = [.width]
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text, written: $written)
-    }
+        grip.isHidden = storageKey == nil
+        grip.onDrag = { [weak self] delta in self?.drag(by: delta) }
+        grip.onSettle = { [weak self] in self?.remember() }
+        grip.onReset = { [weak self] in self?.giveTheHeightBack() }
 
-    final class Coordinator: NSObject, NSTextViewDelegate {
-        private let text: Binding<String>
-        private let written: Binding<CGFloat>
+        addSubview(grip)
+        addSubview(scroll)
 
-        init(text: Binding<String>, written: Binding<CGFloat>) {
-            self.text = text
-            self.written = written
+        chosen = storageKey.flatMap { key in
+            let saved = UserDefaults.standard.double(forKey: key)
+            return saved > 0 ? CGFloat(saved) : nil
         }
+        boxHeight = scroll.heightAnchor.constraint(
+            equalToConstant: chosen ?? minHeight)
 
-        func textDidChange(_ notification: Notification) {
-            guard let view = notification.object as? NSTextView else { return }
-            text.wrappedValue = view.string
-            report(view)
+        NSLayoutConstraint.activate([
+            grip.topAnchor.constraint(equalTo: topAnchor),
+            grip.leadingAnchor.constraint(equalTo: leadingAnchor),
+            grip.trailingAnchor.constraint(equalTo: trailingAnchor),
+            grip.heightAnchor.constraint(equalToConstant: gripHeight),
+            scroll.topAnchor.constraint(equalTo: grip.bottomAnchor),
+            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
+            boxHeight,
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("not from a nib") }
+
+    func apply(text: String, prompt: String, enabled: Bool) {
+        if textView.string != text {
+            textView.string = text
+            fitToText(animated: false)
         }
+        textView.placeholder = prompt
+        textView.isEditable = enabled
+        textView.isSelectable = enabled
+        textView.textColor = enabled ? .labelColor : .disabledControlTextColor
+        grip.isEnabled = enabled
+        needsDisplay = true
+        textView.needsDisplay = true
+    }
 
-        /// The laid-out height of the text, published back to the layout.
-        /// Reported after the current update rather than during it, since
-        /// a view may not change the state it is being built from.
-        func report(_ view: NSTextView) {
-            guard let manager = view.layoutManager,
-                  let container = view.textContainer else { return }
-            manager.ensureLayout(for: container)
-            let height = manager.usedRect(for: container).height
-            DispatchQueue.main.async { [written] in
-                if abs(written.wrappedValue - height) > 0.5 {
-                    written.wrappedValue = height
-                }
+    // ------------------------------------------------------------ sizing
+
+    /// Dragging moves the constraint and nothing else — no state to
+    /// publish, no storage to write — so the box tracks the cursor.
+    private func drag(by delta: CGFloat) {
+        let height = max(minHeight, boxHeight.constant - delta)
+        chosen = height
+        boxHeight.constant = height
+        invalidateIntrinsicContentSize()
+    }
+
+    private func remember() {
+        guard let storageKey, let chosen else { return }
+        UserDefaults.standard.set(Double(chosen), forKey: storageKey)
+    }
+
+    private func giveTheHeightBack() {
+        chosen = nil
+        if let storageKey { UserDefaults.standard.removeObject(forKey: storageKey) }
+        fitToText(animated: true)
+    }
+
+    /// The height the words ask for, honoured only while nobody has
+    /// chosen one.
+    private func fitToText(animated: Bool) {
+        guard chosen == nil,
+              let manager = textView.layoutManager,
+              let container = textView.textContainer else { return }
+        manager.ensureLayout(for: container)
+        let written = manager.usedRect(for: container).height + 14
+        let height = min(max(written, minHeight), maxHeight)
+        guard abs(boxHeight.constant - height) > 0.5 else { return }
+        if animated {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.12
+                boxHeight.animator().constant = height
             }
+        } else {
+            boxHeight.constant = height
         }
+        invalidateIntrinsicContentSize()
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric,
+               height: boxHeight.constant + gripHeight)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let body = NSRect(x: 0, y: 0, width: bounds.width,
+                          height: bounds.height - gripHeight)
+        let path = NSBezierPath(roundedRect: body.insetBy(dx: 0.5, dy: 0.5),
+                                xRadius: 6, yRadius: 6)
+        (textView.isEditable
+            ? NSColor.textBackgroundColor
+            : NSColor.quaternaryLabelColor.withAlphaComponent(0.12)).setFill()
+        path.fill()
+        NSColor.separatorColor.setStroke()
+        path.stroke()
+    }
+}
+
+extension ProseBox: NSTextViewDelegate {
+    func textDidChange(_ notification: Notification) {
+        onEdit?(textView.string)
+        fitToText(animated: false)
+        textView.needsDisplay = true
+    }
+}
+
+// MARK: - Parts
+
+/// The caret and the placeholder start at the same point because the same
+/// text container decides where both of them go.
+private final class PlaceholderTextView: NSTextView {
+    var placeholder: String = "" {
+        didSet { needsDisplay = true }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard string.isEmpty, !placeholder.isEmpty else { return }
+        placeholder.draw(
+            at: NSPoint(x: textContainerInset.width
+                            + (textContainer?.lineFragmentPadding ?? 0),
+                        y: textContainerInset.height),
+            withAttributes: [
+                .font: font ?? .preferredFont(forTextStyle: .body),
+                .foregroundColor: NSColor.placeholderTextColor,
+            ])
+    }
+}
+
+/// The handle. It reports drags in points and never touches layout itself,
+/// so one view stays in charge of the box's size.
+private final class GripView: NSView {
+    var onDrag: ((CGFloat) -> Void)?
+    var onSettle: (() -> Void)?
+    var onReset: (() -> Void)?
+    var isEnabled = true { didSet { needsDisplay = true } }
+
+    private var dragging = false
+
+    override func resetCursorRects() {
+        guard isEnabled, !isHidden else { return }
+        addCursorRect(bounds, cursor: .resizeUpDown)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard !isHidden else { return }
+        let bar = NSRect(x: (bounds.width - 28) / 2, y: bounds.midY - 2,
+                         width: 28, height: 4)
+        NSColor.tertiaryLabelColor.setFill()
+        NSBezierPath(roundedRect: bar, xRadius: 2, yRadius: 2).fill()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard isEnabled else { return }
+        if event.clickCount == 2 {
+            dragging = false
+            onReset?()
+            return
+        }
+        dragging = true
+    }
+
+    /// Deltas come from the event itself rather than from converted
+    /// positions: while the box resizes under the cursor, a position
+    /// measured against this view describes a view that has already
+    /// moved, which is what made the first version shake.
+    override func mouseDragged(with event: NSEvent) {
+        guard isEnabled, dragging else { return }
+        onDrag?(-event.deltaY)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard dragging else { return }
+        dragging = false
+        onSettle?()
     }
 }
