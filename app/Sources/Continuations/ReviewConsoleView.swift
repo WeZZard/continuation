@@ -1,6 +1,7 @@
 import AppKit
 import ContinuationsKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 enum ReviewKindIcon {
     static func name(_ kind: String) -> String {
@@ -12,8 +13,9 @@ enum ReviewKindIcon {
     }
 }
 
-/// The actionable console for one session: answer its question, rule on
-/// its plan, or send it the message that puts it back to work.
+/// One session, shaped like the conversation it is: what was said fills
+/// the view, and what you can do about it sits at the bottom where a
+/// chat's controls belong — never scrolling away in the feed.
 struct ReviewConsoleView: View {
     @EnvironmentObject private var store: FleetStore
     let row: ReviewRow
@@ -22,27 +24,21 @@ struct ReviewConsoleView: View {
     @State private var written: [String: String] = [:]
     @State private var feedback = ""
     @State private var message = ""
+    @State private var attachments: [URL] = []
     @State private var failed = false
     @State private var sending = false
-    @State private var copiedCommand = false
+    @State private var dropping = false
 
     private var item: ReviewItem? { row.review }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(spacing: 0) {
             header
             Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    content
-                    Divider()
-                    TranscriptView(row: row)
-                }
-                .padding(16)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
+            TranscriptView(row: row)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             Divider()
-            footer
+            dock
         }
         .navigationTitle(title)
     }
@@ -62,7 +58,8 @@ struct ReviewConsoleView: View {
             }
             Spacer()
         }
-        .padding(16)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
     }
 
     private var title: String {
@@ -78,9 +75,41 @@ struct ReviewConsoleView: View {
         row.cwd.isEmpty ? "—" : (row.cwd as NSString).lastPathComponent
     }
 
-    // ------------------------------------------------------------ content
+    // --------------------------------------------------------------- dock
 
-    @ViewBuilder private var content: some View {
+    /// Everything the human acts through, pinned. Its own content scrolls
+    /// when a plan or a question runs long, so the buttons never move.
+    private var dock: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ScrollView {
+                pending
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: dockContentHeight)
+            HStack {
+                if failed {
+                    Text("The decision could not be delivered — see the session.")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+                Spacer()
+                actions
+            }
+        }
+        .padding(12)
+        .background(.bar)
+    }
+
+    private var dockContentHeight: CGFloat {
+        switch item?.kind {
+        case "question": return 260
+        case "plan": return 300
+        case "stopped": return 200
+        default: return 60
+        }
+    }
+
+    @ViewBuilder private var pending: some View {
         switch item?.kind {
         case "question":
             VStack(alignment: .leading, spacing: 18) {
@@ -89,21 +118,108 @@ struct ReviewConsoleView: View {
                 }
             }
         case "plan":
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 10) {
                 Text(item?.payload.plan ?? item?.summary ?? "")
                     .font(.system(.body, design: .monospaced))
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 ProseEditor(prompt: "Feedback, if you want changes",
-                            text: $feedback, minHeight: 72)
+                            text: $feedback, minHeight: 64)
             }
         case "stopped":
-            messageBlock
+            composer
         default:
             Text("This session is working. Nothing is waiting on you.")
+                .font(.caption)
                 .foregroundStyle(.secondary)
         }
     }
+
+    // ----------------------------------------------------------- composer
+
+    private var composer: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if !attachments.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(attachments, id: \.self) { url in
+                            thumbnail(url)
+                        }
+                    }
+                }
+                .frame(height: 62)
+            }
+            ProseEditor(prompt: dropping ? "Drop the image here" : "Message",
+                        text: $message, minHeight: 96,
+                        enabled: row.canReceiveMessage)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .strokeBorder(.tint, lineWidth: dropping ? 2 : 0))
+                .onDrop(of: [.fileURL, .image], isTargeted: $dropping) { providers in
+                    receive(providers)
+                }
+            if !row.canReceiveMessage {
+                unreachableNotice
+            }
+        }
+    }
+
+    private func thumbnail(_ url: URL) -> some View {
+        ZStack(alignment: .topTrailing) {
+            Group {
+                if let image = NSImage(contentsOf: url) {
+                    Image(nsImage: image).resizable().scaledToFill()
+                } else {
+                    Image(systemName: "photo").font(.title3)
+                }
+            }
+            .frame(width: 56, height: 56)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .overlay(RoundedRectangle(cornerRadius: 5).stroke(.separator))
+            Button {
+                attachments.removeAll { $0 == url }
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.white, .black.opacity(0.6))
+            }
+            .buttonStyle(.plain)
+            .padding(2)
+        }
+        .help(url.lastPathComponent)
+    }
+
+    /// A dropped image is copied somewhere stable before it is named to
+    /// the session: screenshots arrive from folders that do not last.
+    private func receive(_ providers: [NSItemProvider]) -> Bool {
+        guard row.canReceiveMessage else { return false }
+        let directory = ReviewComposer.attachmentsDirectory()
+        for provider in providers {
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                guard let url, ReviewComposer.isImage(url) else { return }
+                guard let kept = try? ReviewComposer.keep(url, in: directory)
+                else { return }
+                Task { @MainActor in attachments.append(kept) }
+            }
+        }
+        return true
+    }
+
+    @ViewBuilder private var unreachableNotice: some View {
+        if row.isLocal {
+            Text("This session is no longer holding — its window ran out, or "
+                 + "it was launched with holding off. Type into its terminal "
+                 + "and it becomes reachable again at the next stop.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            Text("This session runs on another node; act on it there.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    // ---------------------------------------------------------- questions
 
     @ViewBuilder
     private func questionBlock(_ question: ReviewQuestion) -> some View {
@@ -142,53 +258,6 @@ struct ReviewConsoleView: View {
         }
     }
 
-    private var messageBlock: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Send this session its next message.")
-                .foregroundStyle(.secondary)
-            ProseEditor(prompt: "Message", text: $message, minHeight: 120,
-                        enabled: row.canReceiveMessage)
-            if !row.canReceiveMessage {
-                unreachableNotice
-            }
-        }
-    }
-
-    /// Why the box is closed, and the one action that opens it. A reason
-    /// without a remedy is just a locked door.
-    @ViewBuilder private var unreachableNotice: some View {
-        if row.isLocal {
-            Text("This session is no longer holding — its window ran out, or "
-                 + "it was launched with holding off. Type into its terminal "
-                 + "and it becomes reachable again at the next stop.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        } else {
-            Text("This session runs on another node; act on it there.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    private var consoleDirectory: URL {
-        InstallerEngine.Paths.standard().consoleSource
-    }
-
-    private func copyLaunch() {
-        guard let command = CaptureLaunch.command(
-            for: .claude, pluginDirectory: consoleDirectory, held: true)
-        else { return }
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(command, forType: .string)
-        copiedCommand = true
-        Task {
-            try? await Task.sleep(for: .milliseconds(1100))
-            copiedCommand = false
-        }
-    }
-
     private func glyph(_ question: ReviewQuestion, _ label: String) -> String {
         let chosen = selections[question.question]?.contains(label) ?? false
         if question.multiSelect == true {
@@ -207,20 +276,7 @@ struct ReviewConsoleView: View {
         selections[question.question] = chosen
     }
 
-    // ------------------------------------------------------------- footer
-
-    private var footer: some View {
-        HStack {
-            if failed {
-                Text("The decision could not be delivered — see the session.")
-                    .font(.caption)
-                    .foregroundStyle(.red)
-            }
-            Spacer()
-            actions
-        }
-        .padding(12)
-    }
+    // ------------------------------------------------------------ actions
 
     @ViewBuilder private var actions: some View {
         switch item?.kind {
@@ -241,14 +297,15 @@ struct ReviewConsoleView: View {
             // same key that sends a message everywhere else on this Mac.
             Button("Send") { sendMessage() }
                 .keyboardShortcut(.return, modifiers: .command)
-                .disabled(!row.canReceiveMessage || trimmedMessage.isEmpty || sending)
+                .disabled(!row.canReceiveMessage || !hasSomethingToSend || sending)
         default:
             EmptyView()
         }
     }
 
-    private var trimmedMessage: String {
-        message.trimmingCharacters(in: .whitespacesAndNewlines)
+    private var hasSomethingToSend: Bool {
+        !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !attachments.isEmpty
     }
 
     /// A question is answered when every one of them has a choice or a
@@ -285,7 +342,7 @@ struct ReviewConsoleView: View {
 
     private func sendMessage() {
         guard let item else { return }
-        let text = trimmedMessage
+        let text = ReviewComposer.message(text: message, attachments: attachments)
         deliver { ReviewActions.answer(reviewID: item.id,
                                        decision: ["message": text]) }
     }
@@ -302,7 +359,11 @@ struct ReviewConsoleView: View {
             await MainActor.run {
                 sending = false
                 failed = !ok
-                if ok { message = ""; feedback = "" }
+                if ok {
+                    message = ""
+                    feedback = ""
+                    attachments = []
+                }
             }
         }
     }
