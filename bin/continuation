@@ -1152,9 +1152,29 @@ def cmd_review(args) -> int:
     rows = conn.execute(
         "SELECT * FROM reviews WHERE status='open' ORDER BY raised_at"
     ).fetchall()
-    print(json.dumps({"reviews": [review_payload(row) for row in rows]},
+    print(json.dumps({"reviews": reviews_with_liveness(rows)},
                      ensure_ascii=False))
     return 0
+
+
+def reviews_with_liveness(rows) -> list:
+    """Review items, with `held` telling the truth.
+
+    A held item is only actionable while the hook that holds it is alive,
+    and that hook can be interrupted — Claude Code kills it, and it has
+    no chance to say so. Reading its liveness costs one ps call for the
+    whole list.
+    """
+    payloads = [review_payload(row) for row in rows]
+    gone = dead_pids(
+        (item.get("payload") or {}).get("holder") for item in payloads)
+    for item in payloads:
+        data = item.get("payload") or {}
+        if data.get("held") and data.get("holder") in gone:
+            data = dict(data)
+            data["held"] = False
+            item["payload"] = data
+    return payloads
 
 
 def review_payload(row: sqlite3.Row) -> dict:
@@ -1910,8 +1930,8 @@ class NodeAPI(BaseHTTPRequestHandler):
                 return self._json({"reviews": []})
         # Reaping is the writer's job; serving is not going to repeat a
         # dead session's request while it waits for the next tick.
-        self._json({"reviews": [review_payload(row) for row in rows
-                                if row["session_ref"] not in dead]})
+        self._json({"reviews": [item for item in reviews_with_liveness(rows)
+                                if item["session_ref"] not in dead]})
 
     def _sessions(self) -> None:
         with readonly() as conn:

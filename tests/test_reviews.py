@@ -298,3 +298,34 @@ def test_the_read_connection_refuses_to_write(cli, store):
         env={**os.environ, "AGENTIC_CONTINUATION_STORE": str(store)})
     assert "REFUSED" in probe.stdout, probe.stdout + probe.stderr
     assert probe.stdout.splitlines()[0] == "1"
+
+
+def test_an_interrupted_hold_stops_offering_send(cli, store):
+    """Interrupting a stop hook kills it without a word. The item it was
+    holding must stop claiming to be reachable, or the console offers a
+    Send that lands nowhere."""
+    gone = dead_pid()
+    cli("review", "raise", "--session", "s-int", "--kind", "stopped",
+        "--cwd", "/w/p", "--summary", "Waiting for your next message",
+        "--payload", "-", stdin=json.dumps({"held": True, "holder": gone}))
+
+    listed = json.loads(cli("review", "list").stdout)["reviews"]
+    assert listed[0]["payload"]["held"] is False
+
+
+def test_a_live_hold_still_offers_send(cli, store):
+    cli("review", "raise", "--session", "s-live-hold", "--kind", "stopped",
+        "--cwd", "/w/p", "--summary", "Waiting for your next message",
+        "--payload", "-",
+        stdin=json.dumps({"held": True, "holder": os.getpid()}))
+    listed = json.loads(cli("review", "list").stdout)["reviews"]
+    assert listed[0]["payload"]["held"] is True
+
+
+def test_an_item_with_no_holder_is_left_alone(cli, store):
+    """A plugin too old to name its holder is not called a liar."""
+    cli("review", "raise", "--session", "s-old", "--kind", "stopped",
+        "--cwd", "/w/p", "--summary", "Waiting for your next message",
+        "--payload", "-", stdin=json.dumps({"held": True}))
+    listed = json.loads(cli("review", "list").stdout)["reviews"]
+    assert listed[0]["payload"]["held"] is True

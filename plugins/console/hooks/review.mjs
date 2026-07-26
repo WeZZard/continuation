@@ -113,7 +113,10 @@ function idle(cli, session, cwd, summary) {
   const raised = runCLI(cli,
     ["review", "raise", "--session", session, "--kind", "stopped",
      "--cwd", cwd, "--summary", summary, "--payload", "-"],
-    { input: JSON.stringify({ held: seconds > 0 }) });
+    // The hook that holds names itself. Interrupting it kills this
+    // process without a word to anyone, and an item that goes on
+    // offering Send after its listener died is a promise nobody kept.
+    { input: JSON.stringify({ held: seconds > 0, holder: process.pid }) });
   if (seconds === 0 || raised.status !== 0) return;
   const reviewID = (raised.stdout ?? "").trim();
 

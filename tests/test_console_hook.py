@@ -219,7 +219,7 @@ def test_a_session_told_not_to_hold_returns_at_once(cli, store):
     assert result.stdout.strip() == ""
     reviews = open_reviews(cli)
     assert [r["summary"] for r in reviews] == ["Waiting for your next message"]
-    assert reviews[0]["payload"] == {"held": False}
+    assert reviews[0]["payload"]["held"] is False
 
 
 def test_a_held_session_takes_a_message_from_the_console(cli, store):
@@ -255,7 +255,7 @@ def test_a_held_item_says_so(cli, store):
         while time.time() < deadline:
             reviews = open_reviews(cli)
             if reviews:
-                assert reviews[0]["payload"] == {"held": True}
+                assert reviews[0]["payload"]["held"] is True
                 cli("review", "clear", "--session", "sess-held-flag")
                 return
             time.sleep(0.2)
@@ -308,7 +308,7 @@ def test_a_session_holds_without_being_asked(cli, store):
         while time.time() < deadline:
             reviews = open_reviews(cli)
             if reviews:
-                assert reviews[0]["payload"] == {"held": True}
+                assert reviews[0]["payload"]["held"] is True
                 cli("review", "answer", str(reviews[0]["id"]),
                     "--decision", "-",
                     stdin=json.dumps({"message": "Carry on."}))
@@ -337,4 +337,4 @@ def test_an_expired_hold_leaves_the_session_visible(cli, store):
     assert result.stdout.strip() == ""
     reviews = open_reviews(cli)
     assert [r["summary"] for r in reviews] == ["Waiting for your next message"]
-    assert reviews[0]["payload"] == {"held": False}
+    assert reviews[0]["payload"]["held"] is False

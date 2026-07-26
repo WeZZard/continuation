@@ -265,3 +265,19 @@ def test_serve_hides_a_session_whose_process_is_gone(server, cli):
 
     reviews = get_json(server["base"], "/v1/reviews")["reviews"]
     assert [r["session_ref"] for r in reviews] == ["s-live"]
+
+
+def test_serve_stops_offering_send_for_an_interrupted_hold(server, cli):
+    """The app reads held-ness from serve, so serve must check it too."""
+    proc = subprocess.Popen(["/usr/bin/true"])
+    proc.wait()
+
+    cli("session", "start", "--session", "s-hold", "--cwd", "/w/hold",
+        "--pid", str(os.getpid()))
+    cli("review", "raise", "--session", "s-hold", "--kind", "stopped",
+        "--cwd", "/w/hold", "--summary", "Waiting for your next message",
+        "--payload", "-",
+        stdin=json.dumps({"held": True, "holder": proc.pid}))
+
+    reviews = get_json(server["base"], "/v1/reviews")["reviews"]
+    assert [r["payload"]["held"] for r in reviews] == [False]
