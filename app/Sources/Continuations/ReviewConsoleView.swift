@@ -29,6 +29,7 @@ struct ReviewConsoleView: View {
     @State private var sending = false
     @State private var dropping = false
     @State private var dropNote: String?
+    @StateObject private var composerBox = ProseBoxHandle()
 
     private var item: ReviewItem? { row.review }
 
@@ -162,8 +163,7 @@ struct ReviewConsoleView: View {
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 ProseEditor(prompt: "Feedback, if you want changes",
-                            text: $feedback, minHeight: 44, maxHeight: 160,
-                            storageKey: "planFeedbackHeight")
+                            text: $feedback, minHeight: 44, maxHeight: 160)
             }
         case "stopped":
             composer
@@ -178,6 +178,11 @@ struct ReviewConsoleView: View {
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 8) {
+            // The grip sits at the top of the whole input area — above the
+            // attachments, not between them and the box — because what it
+            // resizes is the area, not one part of it.
+            ResizeGrip(handle: composerBox, enabled: row.canReceiveMessage)
+                .frame(height: 12)
             if !attachments.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
@@ -189,10 +194,10 @@ struct ReviewConsoleView: View {
                 .frame(height: 62)
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
-            ProseEditor(prompt: "Message — drop images anywhere below",
+            ProseEditor(prompt: "Message — drop images anywhere here",
                         text: $message, minHeight: 52, maxHeight: 240,
                         enabled: row.canReceiveMessage,
-                        storageKey: "composerHeight")
+                        storageKey: "composerHeight", handle: composerBox)
             if !row.canReceiveMessage {
                 unreachableNotice
             }

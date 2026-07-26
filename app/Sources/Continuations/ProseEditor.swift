@@ -11,6 +11,13 @@ import SwiftUI
 /// one layout each frame and the box jittered under the cursor. Here one
 /// view owns its height, moves a constraint directly while dragging, and
 /// tells SwiftUI only once the drag settles.
+/// Lets a grip drawn above the attachments reach the box below them
+/// without a binding: the drag stays inside AppKit, which is what keeps
+/// it smooth.
+final class ProseBoxHandle: ObservableObject {
+    fileprivate weak var box: ProseBox?
+}
+
 struct ProseEditor: NSViewRepresentable {
     let prompt: String
     @Binding var text: String
@@ -18,12 +25,16 @@ struct ProseEditor: NSViewRepresentable {
     var maxHeight: CGFloat = 240
     var enabled: Bool = true
     /// Where a dragged height is remembered; nil for a box that always
-    /// sizes itself and shows no grip.
+    /// sizes itself.
     var storageKey: String?
+    /// The grip lives at the top of the whole input area — above any
+    /// attachments — so it is drawn separately and reaches the box here.
+    var handle: ProseBoxHandle?
 
     func makeNSView(context: Context) -> ProseBox {
         let box = ProseBox(minHeight: minHeight, maxHeight: maxHeight,
                            storageKey: storageKey)
+        handle?.box = box
         box.onEdit = { written in
             // Publish on the next turn of the run loop: a view may not
             // change the state it is being built from.
@@ -48,9 +59,7 @@ final class ProseBox: NSView {
     private let storageKey: String?
     private let scroll = NSScrollView()
     private let textView = PlaceholderTextView()
-    private let grip = GripView()
     private var boxHeight: NSLayoutConstraint!
-    private var gripHeight: CGFloat { storageKey == nil ? 0 : 12 }
     /// A height the human dragged to. While it is set the box keeps it,
     /// however much is written; double-clicking the grip gives it back.
     private var chosen: CGFloat?
@@ -64,8 +73,6 @@ final class ProseBox: NSView {
 
         translatesAutoresizingMaskIntoConstraints = false
         scroll.translatesAutoresizingMaskIntoConstraints = false
-        grip.translatesAutoresizingMaskIntoConstraints = false
-
         scroll.documentView = textView
         scroll.drawsBackground = false
         scroll.contentView.drawsBackground = false
@@ -88,13 +95,12 @@ final class ProseBox: NSView {
         textView.isVerticallyResizable = true
         textView.autoresizingMask = [.width]
 
-        grip.isHidden = storageKey == nil
-        grip.onBegin = { [weak self] in self?.beginDrag() }
-        grip.onDrag = { [weak self] risen in self?.drag(risen: risen) }
-        grip.onSettle = { [weak self] in self?.remember() }
-        grip.onReset = { [weak self] in self?.giveTheHeightBack() }
+        // A text view claims dropped files for itself, which left an
+        // image released on the box doing nothing while the area around
+        // it accepted the same drop. Let them fall through.
+        textView.unregisterDraggedTypes()
+        scroll.unregisterDraggedTypes()
 
-        addSubview(grip)
         addSubview(scroll)
 
         chosen = storageKey.flatMap { key in
@@ -105,11 +111,7 @@ final class ProseBox: NSView {
             equalToConstant: chosen ?? minHeight)
 
         NSLayoutConstraint.activate([
-            grip.topAnchor.constraint(equalTo: topAnchor),
-            grip.leadingAnchor.constraint(equalTo: leadingAnchor),
-            grip.trailingAnchor.constraint(equalTo: trailingAnchor),
-            grip.heightAnchor.constraint(equalToConstant: gripHeight),
-            scroll.topAnchor.constraint(equalTo: grip.bottomAnchor),
+            scroll.topAnchor.constraint(equalTo: topAnchor),
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
             scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -129,14 +131,13 @@ final class ProseBox: NSView {
         textView.isEditable = enabled
         textView.isSelectable = enabled
         textView.textColor = enabled ? .labelColor : .disabledControlTextColor
-        grip.isEnabled = enabled
         needsDisplay = true
         textView.needsDisplay = true
     }
 
     // ------------------------------------------------------------ sizing
 
-    private func beginDrag() {
+    func beginDrag() {
         dragStart = boxHeight.constant
     }
 
@@ -147,20 +148,20 @@ final class ProseBox: NSView {
     /// window coordinates, where up is positive. Up therefore makes the
     /// box taller, which is the direction the hand expects and the
     /// opposite of what event deltas gave.
-    private func drag(risen: CGFloat) {
+    func drag(risen: CGFloat) {
         let height = max(minHeight, (dragStart ?? boxHeight.constant) + risen)
         chosen = height
         boxHeight.constant = height
         invalidateIntrinsicContentSize()
     }
 
-    private func remember() {
+    func remember() {
         dragStart = nil
         guard let storageKey, let chosen else { return }
         UserDefaults.standard.set(Double(chosen), forKey: storageKey)
     }
 
-    private func giveTheHeightBack() {
+    func giveTheHeightBack() {
         chosen = nil
         if let storageKey { UserDefaults.standard.removeObject(forKey: storageKey) }
         fitToText(animated: true)
@@ -188,14 +189,11 @@ final class ProseBox: NSView {
     }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: NSView.noIntrinsicMetric,
-               height: boxHeight.constant + gripHeight)
+        NSSize(width: NSView.noIntrinsicMetric, height: boxHeight.constant)
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let body = NSRect(x: 0, y: 0, width: bounds.width,
-                          height: bounds.height - gripHeight)
-        let path = NSBezierPath(roundedRect: body.insetBy(dx: 0.5, dy: 0.5),
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
                                 xRadius: 6, yRadius: 6)
         (textView.isEditable
             ? NSColor.textBackgroundColor
@@ -237,6 +235,27 @@ private final class PlaceholderTextView: NSTextView {
     }
 }
 
+/// The grip, drawn at the top of the input area and wired straight to the
+/// box: no SwiftUI state changes while a drag is in flight.
+struct ResizeGrip: NSViewRepresentable {
+    let handle: ProseBoxHandle
+    var enabled: Bool = true
+
+    func makeNSView(context: Context) -> NSView {
+        let grip = GripView()
+        grip.onBegin = { [weak handle] in handle?.box?.beginDrag() }
+        grip.onDrag = { [weak handle] risen in handle?.box?.drag(risen: risen) }
+        grip.onSettle = { [weak handle] in handle?.box?.remember() }
+        grip.onReset = { [weak handle] in handle?.box?.giveTheHeightBack() }
+        grip.setContentHuggingPriority(.required, for: .vertical)
+        return grip
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        (view as? GripView)?.isEnabled = enabled
+    }
+}
+
 /// The handle. It reports drags in points and never touches layout itself,
 /// so one view stays in charge of the box's size.
 private final class GripView: NSView {
@@ -251,6 +270,10 @@ private final class GripView: NSView {
     override func resetCursorRects() {
         guard isEnabled, !isHidden else { return }
         addCursorRect(bounds, cursor: .resizeUpDown)
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: 12)
     }
 
     override func draw(_ dirtyRect: NSRect) {
