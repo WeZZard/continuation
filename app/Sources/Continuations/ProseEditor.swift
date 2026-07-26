@@ -227,10 +227,22 @@ extension ProseBox {
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
         guard onAttach != nil, textView.isEditable,
-              !images(on: sender.draggingPasteboard).isEmpty else { return [] }
+              carriesAnImage(sender.draggingPasteboard) else { return [] }
         dragging = true
         onDragHover?(true)
         return .copy
+    }
+
+    /// Answering once is not enough. A destination is asked again for
+    /// every movement, and a view that does not answer is taken to have
+    /// changed its mind — which is why the box lit up on entry and then
+    /// refused the release (2026-07-26).
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        dragging ? .copy : []
+    }
+
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        dragging
     }
 
     override func draggingExited(_ sender: NSDraggingInfo?) {
@@ -247,9 +259,20 @@ extension ProseBox {
         dragging = false
         onDragHover?(false)
         let kept = images(on: sender.draggingPasteboard)
+        NSLog("[composer] drop delivered %d image(s)", kept.count)
         guard !kept.isEmpty else { return false }
         onAttach?(kept)
         return true
+    }
+
+    /// Whether this drag is worth accepting — asked while the cursor
+    /// merely passes over, so it reads and copies nothing.
+    private func carriesAnImage(_ pasteboard: NSPasteboard) -> Bool {
+        let urls = pasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        if urls.contains(where: ReviewComposer.isImage) { return true }
+        return pasteboard.types?.contains { $0 == .png || $0 == .tiff } ?? false
     }
 
     /// Every image on the pasteboard, copied somewhere it will outlive

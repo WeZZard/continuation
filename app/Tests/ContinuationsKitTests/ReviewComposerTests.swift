@@ -88,3 +88,20 @@ extension ReviewComposerTests {
         try? FileManager.default.removeItem(at: scratch)
     }
 }
+
+extension ReviewComposerTests {
+
+    func testAttachmentsAreKeptOutOfTheFolderTheAppReplaces() {
+        // The payload folder is replaced wholesale on every update, which
+        // deleted images an agent had been told to read.
+        let attachments = ReviewComposer.attachmentsDirectory()
+        let umbrella = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(
+                AppSupportUmbrella.directoryName(base: "Continuation"),
+                isDirectory: true)
+        XCTAssertFalse(attachments.path.hasPrefix(umbrella.path + "/"),
+                       "attachments live inside the replaced payload folder")
+        XCTAssertTrue(attachments.path.contains("Continuation"))
+    }
+}

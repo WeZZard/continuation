@@ -31,20 +31,22 @@ public enum ReviewComposer {
             : "\(body)\n\n\(preamble)\n\(lines)"
     }
 
-    /// Where dropped files are kept: inside this build's own umbrella, so
-    /// a debug app never writes into the release app's folders, and never
-    /// into the store, which belongs to the CLI.
+    /// Where dropped files are kept: beside this build's payload folder,
+    /// never inside it. The payload folder is replaced wholesale whenever
+    /// the app refreshes what sessions run, which quietly deleted every
+    /// attachment an agent had been told to read (2026-07-26). Still per
+    /// build, so a debug app never writes into the release app's folders,
+    /// and never the store, which belongs to the CLI.
     public static func attachmentsDirectory(
         bundle: Bundle = .main,
         fileManager: FileManager = .default
     ) -> URL {
         let appSupport = fileManager
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let umbrella = AppSupportUmbrella.directoryName(
+            base: "Continuation", bundleID: bundle.bundleIdentifier)
         return appSupport
-            .appendingPathComponent(
-                AppSupportUmbrella.directoryName(base: "Continuation",
-                                                 bundleID: bundle.bundleIdentifier),
-                isDirectory: true)
+            .appendingPathComponent("\(umbrella) Files", isDirectory: true)
             .appendingPathComponent("attachments", isDirectory: true)
     }
 
