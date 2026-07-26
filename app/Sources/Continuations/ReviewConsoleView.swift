@@ -162,7 +162,7 @@ struct ReviewConsoleView: View {
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 ProseEditor(prompt: "Feedback, if you want changes",
-                            text: $feedback, minHeight: 64)
+                            text: $feedback, minHeight: 44, maxHeight: 160)
             }
         case "stopped":
             composer
@@ -189,7 +189,7 @@ struct ReviewConsoleView: View {
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
             ProseEditor(prompt: "Message — drop images anywhere below",
-                        text: $message, minHeight: 96,
+                        text: $message, minHeight: 52, maxHeight: 240,
                         enabled: row.canReceiveMessage)
             if !row.canReceiveMessage {
                 unreachableNotice
