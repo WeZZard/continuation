@@ -53,14 +53,36 @@ public enum ReviewComposer {
     @discardableResult
     public static func keep(_ source: URL, in directory: URL,
                             fileManager: FileManager = .default) throws -> URL {
+        let destination = try place(name: source.deletingPathExtension()
+                                        .lastPathComponent,
+                                    extension: source.pathExtension.lowercased(),
+                                    in: directory, fileManager: fileManager)
+        try fileManager.copyItem(at: source, to: destination)
+        return destination
+    }
+
+    /// The same, for a drop that carries pixels rather than a file — an
+    /// image dragged out of a browser has no path to copy from.
+    @discardableResult
+    public static func keep(data: Data, extension suffix: String,
+                            in directory: URL,
+                            fileManager: FileManager = .default) throws -> URL {
+        let destination = try place(name: "dropped",
+                                    extension: suffix.isEmpty ? "png" : suffix,
+                                    in: directory, fileManager: fileManager)
+        try data.write(to: destination)
+        return destination
+    }
+
+    private static func place(name: String, extension suffix: String,
+                              in directory: URL,
+                              fileManager: FileManager) throws -> URL {
         try fileManager.createDirectory(at: directory,
                                         withIntermediateDirectories: true)
         let stamp = UUID().uuidString.prefix(8)
-        let name = source.deletingPathExtension().lastPathComponent
-        let destination = directory.appendingPathComponent(
-            "\(name)-\(stamp).\(source.pathExtension.lowercased())")
+        let destination = directory
+            .appendingPathComponent("\(name)-\(stamp).\(suffix)")
         try? fileManager.removeItem(at: destination)
-        try fileManager.copyItem(at: source, to: destination)
         return destination
     }
 }

@@ -65,3 +65,26 @@ final class ReviewComposerTests: XCTestCase {
         try? FileManager.default.removeItem(at: scratch)
     }
 }
+
+extension ReviewComposerTests {
+
+    func testADropCarryingPixelsIsKeptToo() throws {
+        // An image dragged out of a browser has no path to copy from.
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pixels-\(UUID().uuidString)")
+        let kept = try ReviewComposer.keep(data: Data("pixels".utf8),
+                                           extension: "png", in: scratch)
+        XCTAssertEqual(kept.pathExtension, "png")
+        XCTAssertEqual(try Data(contentsOf: kept), Data("pixels".utf8))
+        try? FileManager.default.removeItem(at: scratch)
+    }
+
+    func testAnUntypedDropStillLandsAsAnImage() throws {
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pixels-\(UUID().uuidString)")
+        let kept = try ReviewComposer.keep(data: Data("pixels".utf8),
+                                           extension: "", in: scratch)
+        XCTAssertEqual(kept.pathExtension, "png")
+        try? FileManager.default.removeItem(at: scratch)
+    }
+}

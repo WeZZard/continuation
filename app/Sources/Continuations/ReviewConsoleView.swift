@@ -28,6 +28,7 @@ struct ReviewConsoleView: View {
     @State private var failed = false
     @State private var sending = false
     @State private var dropping = false
+    @State private var dropNote: String?
 
     private var item: ReviewItem? { row.review }
 
@@ -80,17 +81,21 @@ struct ReviewConsoleView: View {
     /// Everything the human acts through, pinned. Its own content scrolls
     /// when a plan or a question runs long, so the buttons never move.
     private var dock: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             ScrollView {
                 pending
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(maxHeight: dockContentHeight)
-            HStack {
+            HStack(spacing: 8) {
                 if failed {
                     Text("The decision could not be delivered — see the session.")
                         .font(.caption)
                         .foregroundStyle(.red)
+                } else if let note = dropNote {
+                    Text(note)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
                 Spacer()
                 actions
@@ -98,6 +103,28 @@ struct ReviewConsoleView: View {
         }
         .padding(12)
         .background(.bar)
+        // The whole dock takes a drop, not the text view alone: an image
+        // released an inch below the box was landing on nothing while the
+        // box still lit up, which promised something it could not do.
+        .onDrop(of: [.fileURL, .image, .png, .jpeg, .tiff],
+                isTargeted: canAttach ? $dropping : .constant(false)) { providers in
+            receive(providers)
+        }
+        .overlay {
+            if dropping && canAttach {
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(.tint, lineWidth: 2)
+                    .background(Color.accentColor.opacity(0.06))
+                    .overlay(Text("Drop images to attach")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.tint))
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+
+    private var canAttach: Bool {
+        item?.kind == "stopped" && row.canReceiveMessage
     }
 
     private var dockContentHeight: CGFloat {
@@ -149,15 +176,9 @@ struct ReviewConsoleView: View {
                 }
                 .frame(height: 62)
             }
-            ProseEditor(prompt: dropping ? "Drop the image here" : "Message",
+            ProseEditor(prompt: "Message — drop images anywhere below",
                         text: $message, minHeight: 96,
                         enabled: row.canReceiveMessage)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .strokeBorder(.tint, lineWidth: dropping ? 2 : 0))
-                .onDrop(of: [.fileURL, .image], isTargeted: $dropping) { providers in
-                    receive(providers)
-                }
             if !row.canReceiveMessage {
                 unreachableNotice
             }
@@ -190,18 +211,57 @@ struct ReviewConsoleView: View {
 
     /// A dropped image is copied somewhere stable before it is named to
     /// the session: screenshots arrive from folders that do not last.
+    ///
+    /// Finder hands over a file URL as data under `public.file-url`, and a
+    /// browser hands over pixels with no path at all — loading it as an
+    /// object returns neither, which is why an accepted drop used to
+    /// vanish.
     private func receive(_ providers: [NSItemProvider]) -> Bool {
-        guard row.canReceiveMessage else { return false }
+        guard canAttach else { return false }
         let directory = ReviewComposer.attachmentsDirectory()
+        var taken = false
         for provider in providers {
-            _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                guard let url, ReviewComposer.isImage(url) else { return }
-                guard let kept = try? ReviewComposer.keep(url, in: directory)
-                else { return }
-                Task { @MainActor in attachments.append(kept) }
+            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                taken = true
+                provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) {
+                    item, _ in
+                    let url: URL? = (item as? URL)
+                        ?? (item as? Data).flatMap { URL(dataRepresentation: $0,
+                                                         relativeTo: nil) }
+                    guard let url, ReviewComposer.isImage(url),
+                          let kept = try? ReviewComposer.keep(url, in: directory)
+                    else {
+                        Task { @MainActor in
+                            dropNote = "That file is not an image."
+                        }
+                        return
+                    }
+                    Task { @MainActor in attach(kept) }
+                }
+            } else if let identifier = provider.registeredTypeIdentifiers.first(
+                where: { UTType($0)?.conforms(to: .image) == true }) {
+                taken = true
+                provider.loadDataRepresentation(forTypeIdentifier: identifier) {
+                    data, _ in
+                    guard let data,
+                          let kept = try? ReviewComposer.keep(
+                            data: data,
+                            extension: UTType(identifier)?
+                                .preferredFilenameExtension ?? "png",
+                            in: directory)
+                    else { return }
+                    Task { @MainActor in attach(kept) }
+                }
             }
         }
-        return true
+        if !taken { dropNote = "Only images can be attached." }
+        return taken
+    }
+
+    @MainActor
+    private func attach(_ url: URL) {
+        attachments.append(url)
+        dropNote = nil
     }
 
     @ViewBuilder private var unreachableNotice: some View {
