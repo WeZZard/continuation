@@ -82,11 +82,21 @@ struct ReviewConsoleView: View {
     /// when a plan or a question runs long, so the buttons never move.
     private var dock: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ScrollView {
+            // A question or a plan can run long, so those scroll under a
+            // ceiling. The composer is measured by what it holds — an
+            // empty attachment strip must take no room at all, and a
+            // fixed height reserved the room whether or not anything
+            // was in it.
+            if let ceiling = dockCeiling {
+                ScrollView {
+                    pending
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: ceiling)
+            } else {
                 pending
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxHeight: dockContentHeight)
             HStack(spacing: 8) {
                 if failed {
                     Text("The decision could not be delivered — see the session.")
@@ -127,12 +137,13 @@ struct ReviewConsoleView: View {
         item?.kind == "stopped" && row.canReceiveMessage
     }
 
-    private var dockContentHeight: CGFloat {
+    /// How tall the pending block may grow before it scrolls; nil for
+    /// content that simply takes the height it needs.
+    private var dockCeiling: CGFloat? {
         switch item?.kind {
         case "question": return 260
         case "plan": return 300
-        case "stopped": return 200
-        default: return 60
+        default: return nil
         }
     }
 
@@ -175,6 +186,7 @@ struct ReviewConsoleView: View {
                     }
                 }
                 .frame(height: 62)
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
             ProseEditor(prompt: "Message — drop images anywhere below",
                         text: $message, minHeight: 96,
@@ -198,7 +210,9 @@ struct ReviewConsoleView: View {
             .clipShape(RoundedRectangle(cornerRadius: 5))
             .overlay(RoundedRectangle(cornerRadius: 5).stroke(.separator))
             Button {
-                attachments.removeAll { $0 == url }
+                withAnimation(.snappy(duration: 0.18)) {
+                    attachments.removeAll { $0 == url }
+                }
             } label: {
                 Image(systemName: "xmark.circle.fill")
                     .foregroundStyle(.white, .black.opacity(0.6))
@@ -260,8 +274,10 @@ struct ReviewConsoleView: View {
 
     @MainActor
     private func attach(_ url: URL) {
-        attachments.append(url)
-        dropNote = nil
+        withAnimation(.snappy(duration: 0.18)) {
+            attachments.append(url)
+            dropNote = nil
+        }
     }
 
     @ViewBuilder private var unreachableNotice: some View {
