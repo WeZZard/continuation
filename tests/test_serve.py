@@ -281,3 +281,23 @@ def test_serve_stops_offering_send_for_an_interrupted_hold(server, cli):
 
     reviews = get_json(server["base"], "/v1/reviews")["reviews"]
     assert [r["payload"]["held"] for r in reviews] == [False]
+
+
+def test_serve_reads_a_session_transcript(server, cli, tmp_path):
+    path = tmp_path / "served.jsonl"
+    with open(path, "w") as handle:
+        handle.write(json.dumps({"type": "user", "message": {
+            "role": "user", "content": "what is the plan"}}) + "\n")
+        handle.write(json.dumps({"type": "assistant", "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "here it is"}]}}) + "\n")
+
+    cli("session", "start", "--session", "s-http", "--cwd", "/w/p",
+        "--pid", str(os.getpid()), "--transcript", str(path))
+
+    read = get_json(server["base"], "/v1/sessions/s-http/transcript")
+    assert read["counts"] == {"prompts": 1, "replies": 1, "tools": 0,
+                              "bytes": os.stat(path).st_size}
+    assert [e["text"] for e in read["entries"]] == ["what is the plan",
+                                                    "here it is"]
+    assert get_status(server["base"], "/v1/sessions/nobody/transcript") == 404

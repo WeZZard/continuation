@@ -43,6 +43,14 @@ public struct NodeClient: Sendable {
         try await get(SessionPage.self, "/v1/sessions").sessions
     }
 
+    public func transcript(sessionRef: String,
+                           limit: Int = 40) async throws -> Transcript {
+        let escaped = sessionRef.addingPercentEncoding(
+            withAllowedCharacters: .urlPathAllowed) ?? sessionRef
+        return try await get(Transcript.self,
+                             "/v1/sessions/\(escaped)/transcript?limit=\(limit)")
+    }
+
     public func tasks() async throws -> [TaskInfo] {
         struct Page: Decodable { let tasks: [TaskInfo] }
         return try await get(Page.self, "/v1/tasks").tasks

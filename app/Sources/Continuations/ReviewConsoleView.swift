@@ -33,9 +33,13 @@ struct ReviewConsoleView: View {
             header
             Divider()
             ScrollView {
-                content
-                    .padding(16)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 20) {
+                    content
+                    Divider()
+                    TranscriptView(row: row)
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             Divider()
             footer

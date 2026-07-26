@@ -177,10 +177,11 @@ function agentPID() {
 /** Register the session on ANY event, not only SessionStart: Claude Code
  *  dispatches SessionStart before a --plugin-dir plugin has loaded, so
  *  presence heals from whatever event arrives first. */
-function ensureSession(cli, session, cwd, source) {
+function ensureSession(cli, session, cwd, source, transcript) {
   const base = ["session", "start", "--session", session,
                 "--cwd", cwd, "--source", source ?? ""];
-  const started = runCLI(cli, [...base, "--pid", String(agentPID())]);
+  const started = runCLI(cli, [...base, "--pid", String(agentPID()),
+                              "--transcript", transcript ?? ""]);
   // A CLI older than --pid would otherwise leave the session
   // unregistered and its reviews orphaned. Presence first; being
   // reapable is the improvement, not the requirement.
@@ -270,7 +271,7 @@ async function main() {
   }
 
   // Everything else means the session is alive: make it discoverable.
-  ensureSession(cli, session, cwd, data.source);
+  ensureSession(cli, session, cwd, data.source, data.transcript_path);
 
   switch (event) {
     case "SessionStart":

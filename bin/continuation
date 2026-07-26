@@ -359,7 +359,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   started_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   ended_at TEXT,
-  pid INTEGER
+  pid INTEGER,
+  transcript TEXT
 );
 CREATE INDEX IF NOT EXISTS sessions_live ON sessions (ended_at);
 """
@@ -377,6 +378,8 @@ def db() -> sqlite3.Connection:
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
     if "pid" not in columns:
         conn.execute("ALTER TABLE sessions ADD COLUMN pid INTEGER")
+    if "transcript" not in columns:
+        conn.execute("ALTER TABLE sessions ADD COLUMN transcript TEXT")
     return conn
 
 
@@ -1157,6 +1160,116 @@ def cmd_review(args) -> int:
     return 0
 
 
+# What a transcript costs to read, remembered per file. The file only
+# ever grows, so a second read starts where the first stopped.
+_TRANSCRIPT_TALLIES: dict = {}
+
+
+def transcript_counts(path: str) -> dict:
+    """How much conversation a session has had, all of it.
+
+    The count comes from the agent's own transcript rather than from
+    anything this program stores, so it survives compaction: a session
+    whose live context was summarized away three times still reports
+    every prompt it was ever given.
+    """
+    empty = {"prompts": 0, "replies": 0, "tools": 0, "bytes": 0}
+    if not path:
+        return empty
+    try:
+        size = os.stat(path).st_size
+    except OSError:
+        return empty
+    cached = _TRANSCRIPT_TALLIES.get(path)
+    if cached and cached["bytes"] == size:
+        return {key: cached[key] for key in empty}
+    tally = dict(cached) if cached and size > cached["bytes"] else dict(empty)
+    start = cached["bytes"] if cached and size > cached["bytes"] else 0
+    try:
+        with open(path, "r", errors="replace") as handle:
+            handle.seek(start)
+            for line in handle:
+                kind, text, tools = transcript_entry(line)
+                if kind == "prompt":
+                    tally["prompts"] += 1
+                elif kind == "reply":
+                    tally["replies"] += 1
+                tally["tools"] += len(tools)
+    except OSError:
+        return empty
+    tally["bytes"] = size
+    _TRANSCRIPT_TALLIES[path] = tally
+    return {key: tally[key] for key in empty}
+
+
+def transcript_entry(line: str):
+    """One transcript line as (kind, text, tool names).
+
+    A tool result is recorded as a user entry, so what counts as a prompt
+    is a user entry carrying words rather than a result.
+    """
+    try:
+        entry = json.loads(line)
+    except (ValueError, TypeError):
+        return (None, "", [])
+    if entry.get("isSidechain"):
+        return (None, "", [])
+    kind = entry.get("type")
+    if kind not in ("user", "assistant"):
+        return (None, "", [])
+    message = entry.get("message") or {}
+    content = message.get("content")
+    text, tools, results = "", [], 0
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        parts = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                parts.append(block.get("text") or "")
+            elif block.get("type") == "tool_use":
+                tools.append(block.get("name") or "tool")
+            elif block.get("type") == "tool_result":
+                results += 1
+        text = "\n".join(part for part in parts if part)
+    if kind == "user":
+        if results and not text.strip():
+            return ("result", "", [])
+        return ("prompt", text, [])
+    return ("reply", text, tools)
+
+
+def transcript_tail(path: str, limit: int = 40, window: int = 2_000_000) -> list:
+    """The last stretch of conversation, newest last.
+
+    Only the tail is read: a transcript runs to tens of megabytes and the
+    console shows the end of it. Everything before is still counted.
+    """
+    if not path:
+        return []
+    try:
+        size = os.stat(path).st_size
+        with open(path, "r", errors="replace") as handle:
+            if size > window:
+                handle.seek(size - window)
+                handle.readline()          # discard the partial line
+            lines = handle.readlines()
+    except OSError:
+        return []
+    entries = []
+    for line in lines:
+        kind, text, tools = transcript_entry(line)
+        if kind not in ("prompt", "reply"):
+            continue
+        if not text.strip() and not tools:
+            continue
+        entries.append({"role": "user" if kind == "prompt" else "assistant",
+                        "text": text.strip(), "tools": tools})
+    return entries[-limit:]
+
+
 def reviews_with_liveness(rows) -> list:
     """Review items, with `held` telling the truth.
 
@@ -1205,10 +1318,10 @@ def cmd_session(args) -> int:
             started = existing["started_at"] if existing else now
             conn.execute(
                 "INSERT OR REPLACE INTO sessions (session_ref, agent, cwd,"
-                " source, started_at, updated_at, ended_at, pid)"
-                " VALUES (?,?,?,?,?,?,NULL,?)",
+                " source, started_at, updated_at, ended_at, pid, transcript)"
+                " VALUES (?,?,?,?,?,?,NULL,?,?)",
                 (args.session, args.agent, args.cwd, args.source, started, now,
-                 args.pid or None))
+                 args.pid or None, args.transcript or None))
             event(conn, "session.start", args.actor,
                   session_ref=args.session, source=args.source)
         return 0
@@ -1223,6 +1336,18 @@ def cmd_session(args) -> int:
                  args.session)).rowcount
             if changed:
                 event(conn, "session.end", args.actor, session_ref=args.session)
+        return 0
+    if args.action == "transcript":
+        if not args.session:
+            raise SystemExit("session transcript requires --session")
+        row = conn.execute(
+            "SELECT transcript FROM sessions WHERE session_ref=?",
+            (args.session,)).fetchone()
+        path = row["transcript"] if row else None
+        print(json.dumps({"session_ref": args.session,
+                          "counts": transcript_counts(path),
+                          "entries": transcript_tail(path, args.limit)},
+                         ensure_ascii=False))
         return 0
     if args.action == "reap":
         print(reap_dead_sessions(conn, args.actor))
@@ -1293,6 +1418,7 @@ def session_payload(row: sqlite3.Row) -> dict:
         "updated_at": row["updated_at"],
         # Absent from stores written before sessions carried a process.
         "pid": row["pid"] if "pid" in keys else None,
+        "transcript": row["transcript"] if "transcript" in keys else None,
     }
 
 
@@ -1903,7 +2029,9 @@ class NodeAPI(BaseHTTPRequestHandler):
                 return self._json(collect_queue(conn, now_local()))
         if head == "reviews" and not rest:
             return self._reviews()
-        if head == "sessions" and not rest:
+        if head == "sessions":
+            if rest:
+                return self._transcript(rest, query)
             return self._sessions()
         if head == "log" and not rest:
             return self._log(query)
@@ -1946,6 +2074,29 @@ class NodeAPI(BaseHTTPRequestHandler):
             gone = dead_pids(row["pid"] for row in rows)
         self._json({"sessions": [session_payload(row) for row in rows
                                  if row["pid"] not in gone]})
+
+    def _transcript(self, rest: list, query: dict) -> None:
+        """The conversation a session is having, read from the agent's own
+        transcript. Counts cover all of it; the entries are its tail."""
+        if len(rest) != 2 or rest[1] != "transcript":
+            return self._json({"error": "unknown endpoint"}, 404)
+        try:
+            limit = max(1, min(200, int(query.get("limit", ["40"])[0])))
+        except (TypeError, ValueError):
+            limit = 40
+        with readonly() as conn:
+            try:
+                row = conn.execute(
+                    "SELECT transcript FROM sessions WHERE session_ref=?",
+                    (rest[0],)).fetchone()
+            except sqlite3.OperationalError:
+                row = None
+        if row is None:
+            return self._json({"error": "unknown session"}, 404)
+        path = row["transcript"]
+        self._json({"session_ref": rest[0],
+                    "counts": transcript_counts(path),
+                    "entries": transcript_tail(path, limit)})
 
     def _node(self) -> None:
         with readonly() as conn:
@@ -2164,7 +2315,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("session",
                        help="Supervised sessions: start/end/list/reap.")
-    p.add_argument("action", choices=("start", "end", "list", "reap"))
+    p.add_argument("action",
+                   choices=("start", "end", "list", "reap", "transcript"))
     p.add_argument("--session", default="")
     p.add_argument("--agent", default="claude-code")
     p.add_argument("--cwd", default="")
@@ -2172,6 +2324,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pid", type=int, default=0,
                    help="The agent process this session belongs to; when it"
                         " dies the session is reaped.")
+    p.add_argument("--transcript", default="",
+                   help="The agent's transcript file, so the console can show"
+                        " the conversation this session is having.")
+    p.add_argument("--limit", type=int, default=40,
+                   help="How many transcript entries to return.")
     p.set_defaults(fn=cmd_session)
 
     p = sub.add_parser("review",

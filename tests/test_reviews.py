@@ -329,3 +329,61 @@ def test_an_item_with_no_holder_is_left_alone(cli, store):
         "--payload", "-", stdin=json.dumps({"held": True}))
     listed = json.loads(cli("review", "list").stdout)["reviews"]
     assert listed[0]["payload"]["held"] is True
+
+
+def write_transcript(path, entries):
+    with open(path, "w") as handle:
+        for entry in entries:
+            handle.write(json.dumps(entry) + "\n")
+
+
+def test_a_transcript_is_counted_whole_and_shown_from_its_end(cli, store, tmp_path):
+    """The count comes from the agent's own file, so it covers the whole
+    conversation — including everything compaction dropped from context."""
+    path = tmp_path / "session.jsonl"
+    entries = []
+    for turn in range(3):
+        entries.append({"type": "user",
+                        "message": {"role": "user", "content": f"prompt {turn}"}})
+        entries.append({"type": "assistant", "message": {"role": "assistant",
+                        "content": [{"type": "text", "text": f"reply {turn}"},
+                                    {"type": "tool_use", "name": "Bash"}]}})
+        entries.append({"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "content": "output"}]}})
+    write_transcript(path, entries)
+
+    cli("session", "start", "--session", "s-script", "--cwd", "/w/p",
+        "--pid", str(os.getpid()), "--transcript", str(path))
+    read = json.loads(cli("session", "transcript", "--session", "s-script",
+                          "--limit", "2").stdout)
+
+    assert read["counts"]["prompts"] == 3      # tool results are not prompts
+    assert read["counts"]["replies"] == 3
+    assert read["counts"]["tools"] == 3
+    assert [e["role"] for e in read["entries"]] == ["user", "assistant"]
+    assert read["entries"][-1]["text"] == "reply 2"
+    assert read["entries"][-1]["tools"] == ["Bash"]
+
+
+def test_counting_a_growing_transcript_resumes_where_it_stopped(cli, store, tmp_path):
+    path = tmp_path / "growing.jsonl"
+    write_transcript(path, [{"type": "user",
+                             "message": {"role": "user", "content": "one"}}])
+    cli("session", "start", "--session", "s-grow", "--cwd", "/w/p",
+        "--transcript", str(path))
+    first = json.loads(cli("session", "transcript", "--session", "s-grow").stdout)
+    assert first["counts"]["prompts"] == 1
+
+    with open(path, "a") as handle:
+        handle.write(json.dumps({"type": "user",
+                                 "message": {"role": "user",
+                                             "content": "two"}}) + "\n")
+    second = json.loads(cli("session", "transcript", "--session", "s-grow").stdout)
+    assert second["counts"]["prompts"] == 2
+
+
+def test_a_session_with_no_transcript_reads_empty(cli, store):
+    cli("session", "start", "--session", "s-none", "--cwd", "/w/p")
+    read = json.loads(cli("session", "transcript", "--session", "s-none").stdout)
+    assert read["entries"] == []
+    assert read["counts"]["prompts"] == 0

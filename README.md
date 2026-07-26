@@ -76,6 +76,7 @@ nodes later. Versioned under `/v1/`, JSON over HTTP, plus an SSE tail:
 | `GET /v1/queue` | The queue exactly as `queue --json` reports it |
 | `GET /v1/tasks`, `/v1/tasks/<id>` | Registry; task detail carries runs and their entries |
 | `GET /v1/tasks/<id>/runs/<run>/prompts[/<name>]` | Archived prompts of each spawn |
+| `GET /v1/sessions`, `/v1/sessions/<ref>/transcript?limit=` | Supervised sessions; the transcript reports counts for the whole conversation and returns its tail |
 | `GET /v1/log?task=&run=&after=&limit=` | Event rows (`after` pages forward by `events.id`) |
 | `GET /v1/events?after=<id>` | SSE stream of new events; `Last-Event-ID` resumes |
 
@@ -222,6 +223,14 @@ by the machine that hosts them — a project spans nodes freely, so each
 row keeps its own. Selecting one opens its console: answer its
 questions (single or multi-select, or write your own), approve its plan
 or send it back with feedback, or send the session its next message.
+
+The console shows the conversation itself, read from the agent's own
+transcript rather than from anything this program stores. That file
+outlives compaction, so the counts describe the whole session — 180
+prompts and 2,401 replies for a session whose live context had been
+summarized away several times — while the entries shown are its tail.
+Reading a 48 MB transcript costs a quarter of a second the first time and
+resumes from the last byte after that.
 
 A session leaves the box when it ends — `SessionEnd` clears its items —
 and when its process dies without saying so. The hook records the agent's

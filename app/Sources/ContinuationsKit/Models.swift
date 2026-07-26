@@ -409,3 +409,52 @@ public struct SupervisedSession: Codable, Hashable, Identifiable, Sendable {
 struct SessionPage: Decodable {
     let sessions: [SupervisedSession]
 }
+
+/// The conversation a session is having, read from the agent's own
+/// transcript: counts cover all of it, entries are its tail.
+public struct Transcript: Codable, Hashable, Sendable {
+    public let sessionRef: String
+    public let counts: TranscriptCounts
+    public let entries: [TranscriptEntry]
+
+    public init(sessionRef: String, counts: TranscriptCounts,
+                entries: [TranscriptEntry]) {
+        self.sessionRef = sessionRef
+        self.counts = counts
+        self.entries = entries
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case sessionRef = "session_ref"
+        case counts, entries
+    }
+}
+
+public struct TranscriptCounts: Codable, Hashable, Sendable {
+    public let prompts: Int
+    public let replies: Int
+    public let tools: Int
+    public let bytes: Int
+
+    public init(prompts: Int, replies: Int, tools: Int, bytes: Int) {
+        self.prompts = prompts
+        self.replies = replies
+        self.tools = tools
+        self.bytes = bytes
+    }
+}
+
+public struct TranscriptEntry: Codable, Hashable, Sendable, Identifiable {
+    public let role: String            // user | assistant
+    public let text: String
+    public let tools: [String]
+
+    public init(role: String, text: String, tools: [String]) {
+        self.role = role
+        self.text = text
+        self.tools = tools
+    }
+
+    /// Position carries the identity: the same words can be said twice.
+    public var id: String { "\(role)#\(text.hashValue)#\(tools.joined())" }
+}
